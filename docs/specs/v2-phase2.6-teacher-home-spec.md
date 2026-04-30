@@ -1,0 +1,480 @@
+# V2 Phase 2.6 Spec: Teacher Home and Classroom Records
+
+## 1. Background
+
+Phase 2.5 is complete and frozen as the teacher classroom analysis center.
+
+Phase 2.5 answers:
+
+```text
+How does a teacher understand one analyzed classroom session?
+```
+
+Phase 2.6 answers:
+
+```text
+How does a teacher enter the system, understand recent classroom status, and find the session to analyze?
+```
+
+This phase turns the cloud dashboard from a single analysis page into a lightweight teacher-side product.
+
+## 2. Stage Goal
+
+Phase 2.6 builds:
+
+- teacher home page
+- classroom records center
+- navigation into the existing Phase 2.5 analysis detail page
+- teacher-facing aggregate data from existing database tables
+
+## 3. Confirmed Route Direction
+
+Add lightweight teacher routes:
+
+```text
+GET /teacher
+  Teacher home
+
+GET /teacher/results
+  Classroom records center
+
+GET /dashboard?result_id={result_id}
+  Existing Phase 2.5 single-classroom analysis detail
+```
+
+`/dashboard` remains the analysis detail center and should not be rewritten in Phase 2.6.
+
+## 4. User Workflow
+
+Primary flow:
+
+```text
+Teacher opens /teacher
+  -> reviews recent classroom summary
+  -> opens a recent classroom analysis
+  -> navigates to /dashboard?result_id=xxx
+  -> reviews the Phase 2.5 analysis detail
+```
+
+Records flow:
+
+```text
+Teacher opens /teacher/results
+  -> filters by classroom, status, and time range
+  -> finds a classroom record
+  -> clicks "View Analysis"
+  -> opens /dashboard?result_id=xxx
+```
+
+Stage-specific identity behavior:
+
+```text
+If a valid teacher auth context exists:
+  use current teacher context
+else:
+  use demo/default teacher context for competition demo
+```
+
+Full login role routing is reserved for a later phase.
+
+## 5. Page Modules
+
+### 5.1 `/teacher` Teacher Home
+
+Required modules:
+
+1. Top navigation
+   - platform name
+   - Teacher Console marker
+   - links: Home, Classroom Records, Analysis Detail
+   - current teacher label or demo teacher label
+
+2. Welcome and status overview
+   - teacher welcome text
+   - last data update time
+   - recent classroom summary
+   - button to classroom records
+
+3. Metric cards
+   - classroom count
+   - total result count
+   - recent result count
+   - raw/pending review count
+   - reviewed count
+   - archived count
+   - average feedback score
+   - average attention score
+   - average response score
+
+4. Recent classroom analyses
+   - latest 5 classroom sessions/results
+   - classroom
+   - lesson
+   - time
+   - feedback score
+   - status
+   - action: view analysis
+
+5. Todo items / teaching tips
+   - pending review reminder
+   - low attention reminder
+   - high quality classroom reminder
+   - no-data guidance
+
+6. Classroom overview
+   - classrooms owned by or visible to the teacher
+   - result count
+   - average feedback score
+   - latest result time
+   - action: view records for this classroom
+
+### 5.2 `/teacher/results` Classroom Records Center
+
+Required modules:
+
+1. Top navigation
+2. Filters
+   - classroom
+   - status: raw, reviewed, archived
+   - time range: 7 days, 30 days, all
+   - limit/page controls
+3. Records list
+   - result id
+   - classroom
+   - lesson
+   - recorded/generated/created time
+   - duration
+   - feedback score
+   - attention score
+   - response score
+   - status
+   - video availability
+   - action: view analysis
+4. Empty state
+5. Link to `/dashboard?result_id=xxx`
+
+### 5.3 `/dashboard?result_id=xxx`
+
+Phase 2.6 must ensure `/dashboard?result_id=xxx` loads the requested result first.
+
+If `result_id` is invalid:
+
+- show a visible error
+- keep recent list available
+- do not crash the dashboard
+
+## 6. Data Model and Database Design
+
+Phase 2.6 does not add core database tables.
+
+Use existing concepts:
+
+```text
+users
+classrooms
+sessions
+analysis_results
+```
+
+Logical model:
+
+```text
+Teacher
+- id
+- username
+- role
+- is_active
+
+Classroom
+- classroom_id
+- name
+- teacher_user_id
+- created_at
+
+ClassroomSession
+- id
+- analysis_id
+- classroom_id
+- video_id
+- recorded_at
+- generated_at
+- duration_seconds
+- raw_json_path
+- created_at
+
+AnalysisResult
+- analysis_id
+- session_id
+- classroom_id
+- classroom_name
+- lesson_title
+- source_kind
+- source_path
+- source_host
+- generated_at
+- feedback_score
+- attention_score
+- response_score
+- status
+- updated_at
+- payload_json
+- created_at
+```
+
+If an existing deployment is missing Phase 2-compatible columns, use small `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` compatibility changes only. Do not introduce new normalized tables in this phase.
+
+### 6.1 Teacher Context
+
+If auth is available:
+
+```text
+current_user.id -> classrooms.teacher_user_id -> classroom results
+```
+
+If auth is not available:
+
+```text
+demo/default teacher context -> all visible/demo classroom results
+```
+
+This keeps the competition demo unblocked while preserving a future auth path.
+
+### 6.2 Derived Fields
+
+`has_video` and `video_status` should be derived from existing `payload_json`, `video_id`, `source_path`, or Phase 2.5 video display mapping.
+
+`todo_items` should be generated by server rules, not stored in the database.
+
+Suggested rules:
+
+- `raw_count > 0`: pending review reminder
+- `attention_score < 75`: low attention reminder
+- `feedback_score >= 90`: high quality classroom reminder
+- no data: upload waiting guidance
+
+## 7. API Design
+
+### 7.1 Teacher Overview
+
+```http
+GET /api/teacher/overview
+```
+
+Purpose:
+
+- drives `/teacher`
+
+Expected response:
+
+```json
+{
+  "success": true,
+  "teacher": {
+    "id": 1,
+    "username": "demo_teacher",
+    "display_name": "Demo Teacher",
+    "role": "teacher"
+  },
+  "metrics": {
+    "classroom_count": 0,
+    "total_result_count": 0,
+    "recent_result_count": 0,
+    "raw_count": 0,
+    "reviewed_count": 0,
+    "archived_count": 0,
+    "avg_feedback_score": null,
+    "avg_attention_score": null,
+    "avg_response_score": null
+  },
+  "latest_results": [],
+  "classroom_summaries": [],
+  "todo_items": []
+}
+```
+
+Required keys must always exist.
+
+### 7.2 Teacher Results
+
+```http
+GET /api/teacher/results
+```
+
+Parameters:
+
+```text
+classroom_id
+status
+days
+limit
+offset or page
+```
+
+Expected response:
+
+```json
+{
+  "success": true,
+  "filters": {
+    "classroom_id": "",
+    "status": "",
+    "days": 30,
+    "limit": 20,
+    "offset": 0
+  },
+  "items": [],
+  "total": 0
+}
+```
+
+Each item should include:
+
+```text
+result_id
+analysis_id
+classroom_id
+classroom_name
+lesson_title
+recorded_at
+generated_at
+created_at
+duration_seconds
+feedback_score
+attention_score
+response_score
+status
+has_video
+video_status
+detail_url
+updated_at
+```
+
+### 7.3 Reused APIs
+
+Reuse:
+
+```text
+GET /api/teacher/classrooms
+GET /api/teacher/results/recent
+GET /api/teacher/results/{result_id}
+PATCH /api/teacher/results/{result_id}/status
+GET /dashboard
+```
+
+## 8. Frontend Interaction Design
+
+Use server-rendered HTML plus embedded JavaScript, consistent with Phase 2.5.
+
+Do not introduce an independent Vue/Vite frontend in Phase 2.6.
+
+### 8.1 `/teacher`
+
+On load:
+
+```text
+fetch /api/teacher/overview
+render welcome
+render metrics
+render latest_results
+render classroom_summaries
+render todo_items
+```
+
+Interactions:
+
+- "View Classroom Records" -> `/teacher/results`
+- latest result "View Analysis" -> `/dashboard?result_id=xxx`
+- classroom summary "View Records" -> `/teacher/results?classroom_id=xxx`
+- todo item click -> its `target_url`
+
+### 8.2 `/teacher/results`
+
+On load:
+
+```text
+read URL query
+fetch /api/teacher/classrooms
+fetch /api/teacher/results?...filters
+render records
+```
+
+Interactions:
+
+- changing filters refreshes records and updates URL query
+- "View Analysis" opens `/dashboard?result_id=xxx`
+- empty results show friendly empty state
+
+### 8.3 `/dashboard?result_id=xxx`
+
+Dashboard should:
+
+- read `result_id` from query string
+- load that detail first when present
+- otherwise keep Phase 2.5 default behavior
+
+## 9. Validation Criteria
+
+Page validation:
+
+- `GET /teacher` returns `200`
+- `GET /teacher/results` returns `200`
+- `GET /dashboard?result_id=xxx` returns `200`
+- all three pages share Teacher Console navigation
+
+API validation:
+
+- `GET /api/teacher/overview` returns `200`
+- response contains `teacher`, `metrics`, `latest_results`, `classroom_summaries`, `todo_items`
+- `GET /api/teacher/results` returns `200`
+- filtering by `classroom_id`, `status`, and `days` works
+- invalid status returns `400`
+- limit is bounded
+
+Workflow validation:
+
+- `/teacher` latest result opens `/dashboard?result_id=xxx`
+- `/teacher` classroom card opens `/teacher/results?classroom_id=xxx`
+- `/teacher` todo item opens filtered records
+- `/teacher/results` record opens `/dashboard?result_id=xxx`
+- `/dashboard?result_id=xxx` loads the requested result first
+
+Regression validation:
+
+- Phase 2.5 dashboard remains usable
+- four classroom charts still render
+- reviewed/archived still works
+- Phase 1 upload/read APIs remain available
+- raw JSON persistence remains unchanged
+
+## 10. Risks
+
+- Scope can expand into a full teacher management system.
+- Auth can block demo if strict login is required.
+- Database over-design can slow progress.
+- `/teacher/results` and `/dashboard` can become duplicate pages if responsibilities are unclear.
+- SSHFS workspace cannot fully validate runtime behavior.
+
+## 11. Non-Goals
+
+Do not implement:
+
+- admin console
+- full login role routing
+- strict permission isolation
+- course schedule management
+- teacher notes
+- report export
+- video upload API
+- video transcoding
+- device management
+- trend analysis dashboard
+- AI teaching recommendations
+- new core database tables
+- raw JSON structure changes
+- independent frontend rewrite
+
+## 12. Future Phases
+
+- Phase 2.7: admin console and platform overview
+- Phase 2.8: device and video ingestion status
+- Phase 3: trends, reports, and intelligent feedback

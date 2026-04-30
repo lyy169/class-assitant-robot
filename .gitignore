@@ -27,6 +27,11 @@ logs/
 uploads/
 instance/
 cloud_backend/data/
+cloud_backend/sample_data/
+samples/
+image/
+picture/
+cls_*.json
 
 node_modules/
 dist/
