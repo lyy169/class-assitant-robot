@@ -1,11 +1,12 @@
-"""V2 Phase 1 auth, admin, and teacher API routes."""
+"""V2 auth, role, admin, and teacher API routes."""
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, Optional
 
 import psycopg2
 import psycopg2.extras
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field
 
 from .config import settings
@@ -32,6 +33,9 @@ class StatusUpdateRequest(BaseModel):
     status: str
 
 
+AUTH_COOKIE_NAME = "auth_token"
+
+
 def _database_url() -> str:
     database_url = settings.database_url.strip()
     if not database_url.startswith(("postgresql://", "postgres://")):
@@ -51,7 +55,13 @@ def _get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT id, username, password_hash, role, is_active
+                SELECT
+                    user_id::text AS user_id,
+                    username,
+                    display_name,
+                    password_hash,
+                    role,
+                    is_active
                 FROM users
                 WHERE username = %s
                 """,
@@ -61,33 +71,74 @@ def _get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
             return dict(row) if row else None
 
 
-def _get_current_user(authorization: Optional[str] = Header(default=None)) -> Dict[str, Any]:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="missing bearer token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    token = authorization[len("Bearer "):].strip()
-    payload = decode_access_token(token)
+def _get_user_by_user_id(user_id: str) -> Optional[Dict[str, Any]]:
+    with _connect() as connection:
+        with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    user_id::text AS user_id,
+                    username,
+                    display_name,
+                    role,
+                    is_active
+                FROM users
+                WHERE user_id::text = %s
+                """,
+                (str(user_id),),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+
+def _user_public(user: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "id": int(payload["sub"]),
-        "username": payload.get("username"),
-        "role": payload.get("role"),
+        "user_id": str(user.get("user_id") or ""),
+        "username": user.get("username") or "",
+        "display_name": user.get("display_name") or user.get("username") or "",
+        "role": user.get("role") or "",
     }
 
 
-def _optional_current_user(authorization: Optional[str] = Header(default=None)) -> Optional[Dict[str, Any]]:
-    if not authorization or not authorization.startswith("Bearer "):
+def _token_from_inputs(auth_token: Optional[str], authorization: Optional[str]) -> Optional[str]:
+    if auth_token:
+        return auth_token
+    if authorization and authorization.startswith("Bearer "):
+        return authorization[len("Bearer "):].strip()
+    return None
+
+
+def _user_from_token(token: str) -> Dict[str, Any]:
+    payload = decode_access_token(token)
+    user = _get_user_by_user_id(str(payload["sub"]))
+    if not user or not user.get("is_active"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid user")
+    return _user_public(user)
+
+
+def _get_current_user(
+    auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME),
+    authorization: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    token = _token_from_inputs(auth_token, authorization)
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="missing auth token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return _user_from_token(token)
+
+
+def _optional_current_user(
+    auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME),
+    authorization: Optional[str] = Header(default=None),
+) -> Optional[Dict[str, Any]]:
+    token = _token_from_inputs(auth_token, authorization)
+    if not token:
         return None
     try:
-        token = authorization[len("Bearer "):].strip()
-        payload = decode_access_token(token)
-        return {
-            "id": int(payload["sub"]),
-            "username": payload.get("username"),
-            "role": payload.get("role"),
-        }
+        return _user_from_token(token)
     except Exception:
         return None
 
@@ -104,8 +155,31 @@ def _require_teacher(current_user: Dict[str, Any] = Depends(_get_current_user)) 
     return current_user
 
 
+def require_page_user(
+    auth_token: Optional[str],
+    required_role: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not auth_token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="login required")
+    user = _user_from_token(auth_token)
+    if required_role == "admin" and user.get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="admin role required")
+    if required_role == "teacher" and user.get("role") not in {"teacher", "admin"}:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="teacher role required")
+    return user
+
+
+def optional_page_user(auth_token: Optional[str]) -> Optional[Dict[str, Any]]:
+    if not auth_token:
+        return None
+    try:
+        return _user_from_token(auth_token)
+    except Exception:
+        return None
+
+
 @router.post("/auth/login")
-def login(request: LoginRequest) -> Dict[str, Any]:
+def login(request: LoginRequest, response: Response) -> Dict[str, Any]:
     user = _get_user_by_username(request.username)
     if not user or not user.get("is_active"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
@@ -113,25 +187,33 @@ def login(request: LoginRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
 
     token = create_access_token(
-        subject=str(user["id"]),
+        subject=str(user["user_id"]),
         claims={"username": user["username"], "role": user["role"]},
     )
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    public_user = _user_public(user)
     return {
-        "token": token,
-        "role": user["role"],
-        "access_token": token,
-        "token_type": "bearer",
-        "user": {
-            "id": user["id"],
-            "username": user["username"],
-            "role": user["role"],
-        },
+        "success": True,
+        "user": public_user,
+        "redirect_to": "/admin" if public_user["role"] == "admin" else "/teacher",
     }
 
 
 @router.get("/auth/me")
 def current_user(current_user: Dict[str, Any] = Depends(_get_current_user)) -> Dict[str, Any]:
     return {"success": True, "user": current_user}
+
+
+@router.post("/auth/logout")
+def logout(response: Response) -> Dict[str, Any]:
+    response.delete_cookie(key=AUTH_COOKIE_NAME, path="/")
+    return {"success": True}
 
 
 @router.post("/admin/users")
@@ -143,30 +225,30 @@ def create_user(request: UserCreateRequest, _: Dict[str, Any] = Depends(_require
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                INSERT INTO users (username, password_hash, role)
-                VALUES (%s, %s, %s)
+                INSERT INTO users (user_id, username, password_hash, role, display_name)
+                VALUES (%s::uuid, %s, %s, %s, %s)
                 ON CONFLICT (username) DO UPDATE SET
                     password_hash = EXCLUDED.password_hash,
                     role = EXCLUDED.role,
+                    display_name = EXCLUDED.display_name,
                     is_active = TRUE
-                RETURNING id, username, role, is_active, created_at
+                RETURNING user_id::text AS user_id, username, display_name, role, is_active, created_at
                 """,
-                (request.username, hash_password(request.password), request.role),
+                (str(uuid.uuid4()), request.username, hash_password(request.password), request.role, request.username),
             )
             user = dict(cursor.fetchone())
             if request.classroom_id:
                 cursor.execute(
                     """
-                    INSERT INTO classrooms (classroom_id, name, teacher_user_id)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (classroom_id) DO UPDATE SET
-                        name = EXCLUDED.name,
-                        teacher_user_id = EXCLUDED.teacher_user_id
+                    INSERT INTO teacher_classrooms (user_id, classroom_id, classroom_name)
+                    VALUES (%s::uuid, %s, %s)
+                    ON CONFLICT (user_id, classroom_id) DO UPDATE SET
+                        classroom_name = EXCLUDED.classroom_name
                     """,
                     (
+                        user["user_id"],
                         request.classroom_id,
                         request.classroom_name or request.classroom_id,
-                        user["id"],
                     ),
                 )
     return {"success": True, "user": user}
@@ -178,12 +260,12 @@ def list_users(_: Dict[str, Any] = Depends(_require_admin)) -> Dict[str, Any]:
         with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
             cursor.execute(
                 """
-                SELECT u.id, u.username, u.role, u.is_active, u.created_at,
-                       COALESCE(json_agg(c.classroom_id) FILTER (WHERE c.classroom_id IS NOT NULL), '[]') AS classrooms
+                SELECT u.user_id::text AS user_id, u.username, u.display_name, u.role, u.is_active, u.created_at,
+                       COALESCE(json_agg(tc.classroom_id) FILTER (WHERE tc.classroom_id IS NOT NULL), '[]') AS classrooms
                 FROM users u
-                LEFT JOIN classrooms c ON c.teacher_user_id = u.id
-                GROUP BY u.id
-                ORDER BY u.id
+                LEFT JOIN teacher_classrooms tc ON tc.user_id = u.user_id
+                GROUP BY u.user_id, u.username, u.display_name, u.role, u.is_active, u.created_at
+                ORDER BY u.created_at
                 """
             )
             users = [dict(row) for row in cursor.fetchall()]
@@ -194,7 +276,7 @@ def list_users(_: Dict[str, Any] = Depends(_require_admin)) -> Dict[str, Any]:
 def teacher_sessions(current_user: Dict[str, Any] = Depends(_require_teacher)) -> Dict[str, Any]:
     from .main import repository
 
-    sessions = repository.get_teacher_sessions(int(current_user["id"]))
+    sessions = repository.get_teacher_sessions(current_user["user_id"])
     return {"success": True, "sessions": sessions}
 
 
@@ -207,7 +289,7 @@ def teacher_session_detail(
 
     if hasattr(repository, "get_teacher_session_detail"):
         session = repository.get_teacher_session_detail(
-            int(current_user["id"]),
+            current_user["user_id"],
             analysis_id,
             is_admin=current_user.get("role") == "admin",
         )
@@ -226,7 +308,7 @@ def teacher_trends(
     from .main import repository
 
     if hasattr(repository, "get_teacher_trends"):
-        trends = repository.get_teacher_trends(int(current_user["id"]), limit=limit)
+        trends = repository.get_teacher_trends(current_user["user_id"], limit=limit)
     else:
         trends = []
     return {"success": True, "limit": limit, "trends": trends}
@@ -237,6 +319,7 @@ def teacher_results_recent(
     limit: int = Query(default=10, ge=1, le=100),
     classroom_id: Optional[str] = None,
     status: Optional[str] = None,
+    current_user: Dict[str, Any] = Depends(_require_teacher),
 ) -> Dict[str, Any]:
     from .main import repository
 
@@ -251,7 +334,8 @@ def teacher_results_recent(
             "fallback_to_sample": False,
             "items": [],
         }
-    items = repository.get_workbench_recent(limit=limit, classroom_id=classroom_id, status=status)
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
+    items = repository.get_workbench_recent(limit=limit, classroom_id=classroom_id, status=status, user_id=user_id)
     return {
         "success": True,
         "limit": limit,
@@ -263,19 +347,20 @@ def teacher_results_recent(
 
 
 @router.get("/teacher/classrooms")
-def teacher_classrooms() -> Dict[str, Any]:
+def teacher_classrooms(current_user: Dict[str, Any] = Depends(_require_teacher)) -> Dict[str, Any]:
     from .main import repository
 
     if not hasattr(repository, "get_workbench_classrooms"):
         return {"success": True, "items": []}
-    return {"success": True, "items": repository.get_workbench_classrooms()}
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
+    return {"success": True, "items": repository.get_workbench_classrooms(user_id=user_id)}
 
 
 @router.get("/teacher/overview")
-def teacher_overview(current_user: Optional[Dict[str, Any]] = Depends(_optional_current_user)) -> Dict[str, Any]:
+def teacher_overview(current_user: Dict[str, Any] = Depends(_require_teacher)) -> Dict[str, Any]:
     from .main import repository
 
-    user_id = int(current_user["id"]) if current_user and current_user.get("id") else None
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
     if not hasattr(repository, "get_teacher_overview"):
         return {
             "success": True,
@@ -319,14 +404,14 @@ def teacher_results(
     days: Optional[str] = Query(default="30"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
-    current_user: Optional[Dict[str, Any]] = Depends(_optional_current_user),
+    current_user: Dict[str, Any] = Depends(_require_teacher),
 ) -> Dict[str, Any]:
     from .main import repository
 
     if status not in (None, "", "raw", "reviewed", "archived"):
         raise HTTPException(status_code=400, detail="status must be raw, reviewed, or archived")
     parsed_days = _parse_days(days)
-    user_id = int(current_user["id"]) if current_user and current_user.get("id") else None
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
     if not hasattr(repository, "get_teacher_results"):
         return {
             "success": True,
@@ -351,7 +436,7 @@ def teacher_results(
 
 
 @router.get("/admin/overview")
-def admin_overview() -> Dict[str, Any]:
+def admin_overview(_: Dict[str, Any] = Depends(_require_admin)) -> Dict[str, Any]:
     from .main import repository
 
     if not hasattr(repository, "get_admin_overview"):
@@ -391,6 +476,7 @@ def admin_classrooms(
     teacher_id: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    _: Dict[str, Any] = Depends(_require_admin),
 ) -> Dict[str, Any]:
     from .main import repository
 
@@ -404,6 +490,7 @@ def admin_teachers(
     q: Optional[str] = None,
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    _: Dict[str, Any] = Depends(_require_admin),
 ) -> Dict[str, Any]:
     from .main import repository
 
@@ -420,6 +507,7 @@ def admin_results(
     days: Optional[str] = Query(default="30"),
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
+    _: Dict[str, Any] = Depends(_require_admin),
 ) -> Dict[str, Any]:
     from .main import repository
 
@@ -458,6 +546,7 @@ def admin_ingestion(
     source_host: Optional[str] = None,
     days: Optional[str] = Query(default="30"),
     limit: int = Query(default=20, ge=1, le=100),
+    _: Dict[str, Any] = Depends(_require_admin),
 ) -> Dict[str, Any]:
     from .main import repository
 
@@ -489,26 +578,32 @@ def admin_ingestion(
 
 
 @router.get("/teacher/results/{result_id}")
-def teacher_result_detail(result_id: str) -> Dict[str, Any]:
+def teacher_result_detail(result_id: str, current_user: Dict[str, Any] = Depends(_require_teacher)) -> Dict[str, Any]:
     from .main import repository
 
     if not hasattr(repository, "get_workbench_result_detail"):
         raise HTTPException(status_code=404, detail="result not found")
-    result = repository.get_workbench_result_detail(result_id)
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
+    result = repository.get_workbench_result_detail(result_id, user_id=user_id)
     if result is None:
         raise HTTPException(status_code=404, detail="result not found")
     return {"success": True, "result": result}
 
 
 @router.patch("/teacher/results/{result_id}/status")
-def teacher_result_status(result_id: str, request: StatusUpdateRequest) -> Dict[str, Any]:
+def teacher_result_status(
+    result_id: str,
+    request: StatusUpdateRequest,
+    current_user: Dict[str, Any] = Depends(_require_teacher),
+) -> Dict[str, Any]:
     from .main import repository
 
     if request.status not in {"raw", "reviewed", "archived"}:
         raise HTTPException(status_code=400, detail="status must be raw, reviewed, or archived")
     if not hasattr(repository, "update_workbench_status"):
         raise HTTPException(status_code=404, detail="result not found")
-    result = repository.update_workbench_status(result_id, request.status)
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
+    result = repository.update_workbench_status(result_id, request.status, user_id=user_id)
     if result is None:
         raise HTTPException(status_code=404, detail="result not found")
     return {"success": True, "result": result}

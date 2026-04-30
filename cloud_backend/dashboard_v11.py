@@ -29,6 +29,7 @@ def build_results_center_html(
     status: Optional[str] = None,
     limit: int = 10,
     selected_result_id: Optional[str] = None,
+    current_user: Optional[dict] = None,
 ) -> str:
     latest = _summary(latest_payload)
     latest["source_kind"] = latest_source_kind
@@ -36,6 +37,7 @@ def build_results_center_html(
     filter_value = html.escape(classroom_id or "")
     status_value = status or ""
     selected_result_value = html.escape(selected_result_id or "")
+    user_identity = _identity_bar(current_user)
 
     recent_rows = "".join(_recent_row(item) for item in recent_results)
     if not recent_rows:
@@ -115,6 +117,8 @@ def build_results_center_html(
     .console-badge {{ display: inline-block; margin-bottom: 10px; padding: 5px 12px; border-radius: 999px; background: rgba(255,255,255,0.14); color: #bfdbfe; font-weight: 800; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }}
     .pipeline {{ display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }}
     .pipeline span {{ padding: 7px 12px; border-radius: 999px; background: rgba(255,255,255,0.14); font-weight: 700; }}
+    .identity {{ display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex-wrap: wrap; color: #475569; font-size: 13px; }}
+    .logout {{ border: 0; border-radius: 10px; padding: 8px 10px; font-weight: 800; cursor: pointer; background: #0f172a; color: #fff; }}
     .analysis-card {{ order: 2; }}
     .results-card {{ order: 3; }}
     .debug-card {{ order: 4; }}
@@ -137,6 +141,7 @@ def build_results_center_html(
 </head>
 <body>
   <div class="page">
+    {user_identity}
     <section class="hero card brand-card" data-marker="teacher-analysis-center">
       <span class="console-badge">Teacher Console</span>
       <h1>Intelligent Classroom Behavior Analysis and Teaching Feedback Platform</h1>
@@ -784,6 +789,19 @@ def _classroom_option(classroom_id: Optional[str]) -> str:
         return ""
     escaped = html.escape(classroom_id)
     return f'<option value="{escaped}" selected>{escaped}</option>'
+
+
+def _identity_bar(current_user: Optional[dict]) -> str:
+    if not current_user:
+        return ""
+    display_name = html.escape(str(current_user.get("display_name") or current_user.get("username") or "User"))
+    role = html.escape(str(current_user.get("role") or ""))
+    return f"""
+    <div class="identity" data-marker="phase29-user-identity">
+      <span>{display_name} · {role}</span>
+      <button class="logout" type="button" onclick="fetch('/api/auth/logout', {{method: 'POST'}}).finally(() => window.location.href='/login')">Logout</button>
+    </div>
+    """
 
 
 def _stringify(value: Any) -> str:

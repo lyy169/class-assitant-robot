@@ -1,6 +1,8 @@
 """Teacher home and classroom records pages for V2 Phase 2.6."""
 from __future__ import annotations
 
+from typing import Optional
+
 
 BASE_STYLE = """
   <style>
@@ -11,6 +13,8 @@ BASE_STYLE = """
     .nav-links { display: flex; gap: 10px; flex-wrap: wrap; }
     .nav a { color: #dbeafe; text-decoration: none; font-weight: 700; padding: 8px 10px; border-radius: 10px; }
     .nav a.active, .nav a:hover { background: rgba(255,255,255,.14); color: #fff; }
+    .identity { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: #dbeafe; font-size: 13px; }
+    .logout { border: 0; border-radius: 10px; padding: 8px 10px; font-weight: 800; cursor: pointer; background: rgba(255,255,255,.16); color: #fff; }
     .badge { display: inline-block; border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 800; background: #eef4ff; color: #165dff; }
     .badge.raw { background: #fff7ed; color: #c2410c; }
     .badge.reviewed { background: #ecfdf5; color: #047857; }
@@ -42,7 +46,20 @@ BASE_STYLE = """
 """
 
 
-def _teacher_nav(active: str) -> str:
+def _identity_bar(current_user: Optional[dict]) -> str:
+    if not current_user:
+        return ""
+    display_name = current_user.get("display_name") or current_user.get("username") or "User"
+    role = current_user.get("role") or ""
+    return f"""
+      <div class="identity" data-marker="phase29-user-identity">
+        <span>{display_name} · {role}</span>
+        <button class="logout" type="button" onclick="fetch('/api/auth/logout', {{method: 'POST'}}).finally(() => window.location.href='/login')">Logout</button>
+      </div>
+    """
+
+
+def _teacher_nav(active: str, current_user: Optional[dict] = None) -> str:
     home_class = "active" if active == "home" else ""
     results_class = "active" if active == "results" else ""
     detail_class = "active" if active == "detail" else ""
@@ -57,11 +74,12 @@ def _teacher_nav(active: str) -> str:
         <a class="{results_class}" href="/teacher/results">Classroom Records</a>
         <a class="{detail_class}" href="/dashboard">Analysis Detail</a>
       </div>
+      {_identity_bar(current_user)}
     </nav>
     """
 
 
-def build_teacher_home_html() -> str:
+def build_teacher_home_html(current_user: Optional[dict] = None) -> str:
     template = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -164,10 +182,10 @@ def build_teacher_home_html() -> str:
   </script>
 </body>
 </html>"""
-    return template.replace("__BASE_STYLE__", BASE_STYLE).replace("__TEACHER_NAV__", _teacher_nav("home"))
+    return template.replace("__BASE_STYLE__", BASE_STYLE).replace("__TEACHER_NAV__", _teacher_nav("home", current_user))
 
 
-def build_teacher_results_html() -> str:
+def build_teacher_results_html(current_user: Optional[dict] = None) -> str:
     template = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -296,4 +314,4 @@ def build_teacher_results_html() -> str:
   </script>
 </body>
 </html>"""
-    return template.replace("__BASE_STYLE__", BASE_STYLE).replace("__TEACHER_NAV__", _teacher_nav("results"))
+    return template.replace("__BASE_STYLE__", BASE_STYLE).replace("__TEACHER_NAV__", _teacher_nav("results", current_user))

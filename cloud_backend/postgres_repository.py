@@ -229,7 +229,7 @@ class PostgreSQLResultRepository:
         record = self._row_to_record(row)
         return record["payload"], record["source_path"], record["source_kind"]
 
-    def get_teacher_sessions(self, user_id: int) -> List[Dict[str, Any]]:
+    def get_teacher_sessions(self, user_id: str) -> List[Dict[str, Any]]:
         self.ensure_phase2_schema()
         with self._connect() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
@@ -251,17 +251,17 @@ class PostgreSQLResultRepository:
                         ar.status,
                         ar.updated_at
                     FROM sessions s
-                    JOIN classrooms c ON c.classroom_id = s.classroom_id
+                    JOIN teacher_classrooms tc ON tc.classroom_id = s.classroom_id
                     LEFT JOIN analysis_results ar ON ar.analysis_id = s.analysis_id
-                    WHERE c.teacher_user_id = %s
+                    WHERE tc.user_id::text = %s
                     ORDER BY s.generated_at DESC NULLS LAST, s.created_at DESC
                     LIMIT 50
                     """,
-                    (user_id,),
+                        (str(user_id),),
                 )
                 return [dict(row) for row in cursor.fetchall()]
 
-    def get_teacher_session_detail(self, user_id: int, analysis_id: str, is_admin: bool = False) -> Optional[Dict[str, Any]]:
+    def get_teacher_session_detail(self, user_id: str, analysis_id: str, is_admin: bool = False) -> Optional[Dict[str, Any]]:
         self.ensure_phase2_schema()
         with self._connect() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
@@ -310,12 +310,12 @@ class PostgreSQLResultRepository:
                             ar.updated_at,
                             ar.payload_json
                         FROM sessions s
-                        JOIN classrooms c ON c.classroom_id = s.classroom_id
+                        JOIN teacher_classrooms tc ON tc.classroom_id = s.classroom_id
                         LEFT JOIN analysis_results ar ON ar.analysis_id = s.analysis_id
                         WHERE s.analysis_id = %s
-                          AND c.teacher_user_id = %s
+                          AND tc.user_id::text = %s
                         """,
-                        (analysis_id, user_id),
+                        (analysis_id, str(user_id)),
                     )
                 row = cursor.fetchone()
                 if not row:
@@ -326,7 +326,7 @@ class PostgreSQLResultRepository:
                     result["payload_json"] = json.loads(payload)
                 return result
 
-    def get_teacher_trends(self, user_id: int, limit: int = 5) -> List[Dict[str, Any]]:
+    def get_teacher_trends(self, user_id: str, limit: int = 5) -> List[Dict[str, Any]]:
         normalized_limit = max(1, min(limit, 50))
         self.ensure_phase2_schema()
         with self._connect() as connection:
@@ -343,12 +343,12 @@ class PostgreSQLResultRepository:
                         ar.source_kind,
                         ar.status
                     FROM analysis_results ar
-                    JOIN classrooms c ON c.classroom_id = ar.classroom_id
-                    WHERE c.teacher_user_id = %s
+                    JOIN teacher_classrooms tc ON tc.classroom_id = ar.classroom_id
+                    WHERE tc.user_id::text = %s
                     ORDER BY ar.generated_at DESC NULLS LAST, ar.created_at DESC
                     LIMIT %s
                     """,
-                    (user_id, normalized_limit),
+                    (str(user_id), normalized_limit),
                 )
                 return [dict(row) for row in cursor.fetchall()]
 
@@ -357,70 +357,112 @@ class PostgreSQLResultRepository:
         limit: int = 10,
         classroom_id: Optional[str] = None,
         status: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        return [self._row_to_workbench_item(record) for record in self.get_recent(limit, classroom_id, status)]
+        if user_id is None:
+            return [self._row_to_workbench_item(record) for record in self.get_recent(limit, classroom_id, status)]
+        rows = self._teacher_result_rows(
+            user_id=str(user_id),
+            classroom_id=classroom_id,
+            status=self._normalize_status(status, allow_empty=True),
+            limit=limit,
+            offset=0,
+        )
+        return [self._row_to_workbench_item(self._row_to_record(row)) for row in rows]
 
-    def get_workbench_classrooms(self) -> List[Dict[str, Any]]:
+    def get_workbench_classrooms(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         self.ensure_phase2_schema()
         with self._connect() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                filters = []
+                params: List[Any] = []
+                join_clause = ""
+                if user_id is not None:
+                    join_clause = "JOIN teacher_classrooms tc ON tc.classroom_id = ar.classroom_id"
+                    filters.append("tc.user_id::text = %s")
+                    params.append(str(user_id))
+                where_clause = "WHERE " + " AND ".join(filters) if filters else ""
                 cursor.execute(
-                    """
+                    f"""
                     SELECT
                         COALESCE(NULLIF(ar.classroom_id, ''), 'unknown') AS classroom_id,
                         COALESCE(MAX(NULLIF(ar.classroom_name, '')), MAX(c.name), 'Unknown Classroom') AS classroom_name,
                         COUNT(*) AS result_count,
                         MAX(ar.created_at) AS latest_result_at
                     FROM analysis_results ar
+                    {join_clause}
                     LEFT JOIN classrooms c ON c.classroom_id = ar.classroom_id
+                    {where_clause}
                     GROUP BY COALESCE(NULLIF(ar.classroom_id, ''), 'unknown')
                     ORDER BY MAX(ar.created_at) DESC NULLS LAST
-                    """
+                    """,
+                    tuple(params),
                 )
                 return [dict(row) for row in cursor.fetchall()]
 
-    def get_workbench_result_detail(self, result_id: str) -> Optional[Dict[str, Any]]:
+    def get_workbench_result_detail(self, result_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         normalized_result_id = str(result_id).strip()
         if not normalized_result_id:
             return None
         self.ensure_phase2_schema()
         with self._connect() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                join_clause = ""
+                filters = ["ar.analysis_id = %s"]
+                params: List[Any] = [normalized_result_id]
+                if user_id is not None:
+                    join_clause = "JOIN teacher_classrooms tc ON tc.classroom_id = ar.classroom_id"
+                    filters.append("tc.user_id::text = %s")
+                    params.append(str(user_id))
                 cursor.execute(
-                    """
+                    f"""
                     SELECT ar.*, c.name AS mapped_classroom_name
                     FROM analysis_results ar
+                    {join_clause}
                     LEFT JOIN classrooms c ON c.classroom_id = ar.classroom_id
-                    WHERE ar.analysis_id = %s
+                    WHERE {" AND ".join(filters)}
                     """,
-                    (normalized_result_id,),
+                    tuple(params),
                 )
                 row = cursor.fetchone()
         if not row:
             return None
         return self._row_to_workbench_detail(dict(row))
 
-    def update_workbench_status(self, result_id: str, status: str) -> Optional[Dict[str, Any]]:
+    def update_workbench_status(self, result_id: str, status: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         normalized_result_id = str(result_id).strip()
         normalized_status = self._normalize_status(status, allow_empty=False)
         self.ensure_phase2_schema()
         with self._connect() as connection:
             with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
-                cursor.execute(
+                permission_clause = ""
+                params: List[Any] = [normalized_status, normalized_result_id]
+                if user_id is not None:
+                    permission_clause = """
+                    AND EXISTS (
+                        SELECT 1
+                        FROM teacher_classrooms tc
+                        WHERE tc.classroom_id = analysis_results.classroom_id
+                          AND tc.user_id::text = %s
+                    )
                     """
+                    params.append(str(user_id))
+                cursor.execute(
+                    f"""
                     UPDATE analysis_results
                     SET status = %s, updated_at = now()
                     WHERE analysis_id = %s
+                    {permission_clause}
                     RETURNING *
                     """,
-                    (normalized_status, normalized_result_id),
+                    tuple(params),
                 )
                 row = cursor.fetchone()
         if not row:
             return None
         return self._row_to_workbench_item(self._row_to_record(dict(row)))
 
-    def get_teacher_overview(self, user_id: Optional[int] = None) -> Dict[str, Any]:
+    def get_teacher_overview(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         rows = self._teacher_result_rows(user_id=user_id, limit=500, offset=0)
         items = [self._row_to_teacher_result_item(row) for row in rows]
         classrooms: Dict[str, Dict[str, Any]] = {}
@@ -465,7 +507,7 @@ class PostgreSQLResultRepository:
 
     def get_teacher_results(
         self,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
         classroom_id: Optional[str] = None,
         status: Optional[str] = None,
         days: Optional[int] = 30,
@@ -770,9 +812,9 @@ class PostgreSQLResultRepository:
             params.append(classroom_id)
         if teacher_id:
             if str(teacher_id) == "demo":
-                filters.append("c.teacher_user_id IS NULL")
+                filters.append("tc.user_id IS NULL")
             else:
-                filters.append("c.teacher_user_id::text = %s")
+                filters.append("tc.user_id::text = %s")
                 params.append(str(teacher_id))
         if status:
             filters.append("ar.status = %s")
@@ -789,7 +831,7 @@ class PostgreSQLResultRepository:
                     SELECT
                         ar.*,
                         c.name AS mapped_classroom_name,
-                        c.teacher_user_id,
+                        tc.user_id::text AS teacher_user_id,
                         u.username AS teacher_username,
                         s.recorded_at AS session_recorded_at,
                         s.generated_at AS session_generated_at,
@@ -798,7 +840,8 @@ class PostgreSQLResultRepository:
                     FROM analysis_results ar
                     LEFT JOIN sessions s ON s.analysis_id = ar.analysis_id
                     LEFT JOIN classrooms c ON c.classroom_id = ar.classroom_id
-                    LEFT JOIN users u ON u.id = c.teacher_user_id
+                    LEFT JOIN teacher_classrooms tc ON tc.classroom_id = ar.classroom_id
+                    LEFT JOIN users u ON u.user_id = tc.user_id
                     {where_clause}
                     ORDER BY COALESCE(ar.created_at, ar.generated_at, s.generated_at) DESC NULLS LAST
                     LIMIT %s OFFSET %s
@@ -821,9 +864,9 @@ class PostgreSQLResultRepository:
             params.append(classroom_id)
         if teacher_id:
             if str(teacher_id) == "demo":
-                filters.append("c.teacher_user_id IS NULL")
+                filters.append("tc.user_id IS NULL")
             else:
-                filters.append("c.teacher_user_id::text = %s")
+                filters.append("tc.user_id::text = %s")
                 params.append(str(teacher_id))
         if status:
             filters.append("ar.status = %s")
@@ -840,6 +883,7 @@ class PostgreSQLResultRepository:
                     FROM analysis_results ar
                     LEFT JOIN sessions s ON s.analysis_id = ar.analysis_id
                     LEFT JOIN classrooms c ON c.classroom_id = ar.classroom_id
+                    LEFT JOIN teacher_classrooms tc ON tc.classroom_id = ar.classroom_id
                     {where_clause}
                     """,
                     tuple(params),
@@ -848,7 +892,7 @@ class PostgreSQLResultRepository:
 
     def _teacher_result_rows(
         self,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
         classroom_id: Optional[str] = None,
         status: Optional[str] = None,
         days: Optional[int] = None,
@@ -858,9 +902,11 @@ class PostgreSQLResultRepository:
         self.ensure_phase2_schema()
         filters = []
         params: List[Any] = []
+        join_clause = ""
         if user_id is not None:
-            filters.append("(c.teacher_user_id = %s OR c.teacher_user_id IS NULL)")
-            params.append(user_id)
+            join_clause = "JOIN teacher_classrooms tc ON tc.classroom_id = ar.classroom_id"
+            filters.append("tc.user_id::text = %s")
+            params.append(str(user_id))
         if classroom_id:
             filters.append("ar.classroom_id = %s")
             params.append(classroom_id)
@@ -884,6 +930,7 @@ class PostgreSQLResultRepository:
                         s.duration_seconds AS session_duration_seconds,
                         s.video_id AS session_video_id
                     FROM analysis_results ar
+                    {join_clause}
                     LEFT JOIN sessions s ON s.analysis_id = ar.analysis_id
                     LEFT JOIN classrooms c ON c.classroom_id = ar.classroom_id
                     {where_clause}
@@ -896,16 +943,18 @@ class PostgreSQLResultRepository:
 
     def _teacher_result_count(
         self,
-        user_id: Optional[int] = None,
+        user_id: Optional[str] = None,
         classroom_id: Optional[str] = None,
         status: Optional[str] = None,
         days: Optional[int] = None,
     ) -> int:
         filters = []
         params: List[Any] = []
+        join_clause = ""
         if user_id is not None:
-            filters.append("(c.teacher_user_id = %s OR c.teacher_user_id IS NULL)")
-            params.append(user_id)
+            join_clause = "JOIN teacher_classrooms tc ON tc.classroom_id = ar.classroom_id"
+            filters.append("tc.user_id::text = %s")
+            params.append(str(user_id))
         if classroom_id:
             filters.append("ar.classroom_id = %s")
             params.append(classroom_id)
@@ -922,6 +971,7 @@ class PostgreSQLResultRepository:
                     f"""
                     SELECT COUNT(*)
                     FROM analysis_results ar
+                    {join_clause}
                     LEFT JOIN sessions s ON s.analysis_id = ar.analysis_id
                     LEFT JOIN classrooms c ON c.classroom_id = ar.classroom_id
                     {where_clause}
@@ -1193,10 +1243,10 @@ class PostgreSQLResultRepository:
             hints.append({"type": "metadata_ready", "severity": "ok", "message": "Current ingestion metadata is sufficient for cloud-side traceability."})
         return hints
 
-    def _teacher_context(self, user_id: Optional[int]) -> Dict[str, Any]:
+    def _teacher_context(self, user_id: Optional[str]) -> Dict[str, Any]:
         if user_id is None:
             return {"id": None, "username": "demo_teacher", "display_name": "Demo Teacher", "role": "teacher"}
-        return {"id": user_id, "username": f"teacher_{user_id}", "display_name": f"Teacher {user_id}", "role": "teacher"}
+        return {"id": str(user_id), "user_id": str(user_id), "username": "teacher", "display_name": "Demo Teacher", "role": "teacher"}
 
     def _admin_context(self) -> Dict[str, Any]:
         return {"id": None, "username": "demo_admin", "display_name": "Demo Admin", "role": "admin"}

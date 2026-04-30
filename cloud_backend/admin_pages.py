@@ -1,6 +1,8 @@
 """Admin console pages for V2 Phase 2.7."""
 from __future__ import annotations
 
+from typing import Optional
+
 
 ADMIN_STYLE = """
   <style>
@@ -11,6 +13,8 @@ ADMIN_STYLE = """
     .nav-links { display: flex; flex-wrap: wrap; gap: 9px; }
     .nav a { color: #dbeafe; text-decoration: none; font-weight: 800; padding: 8px 10px; border-radius: 10px; }
     .nav a.active, .nav a:hover { background: rgba(255,255,255,.14); color: #fff; }
+    .identity { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; color: #dbeafe; font-size: 13px; }
+    .logout { border: 0; border-radius: 10px; padding: 8px 10px; font-weight: 800; cursor: pointer; background: rgba(255,255,255,.16); color: #fff; }
     .badge { display: inline-block; border-radius: 999px; padding: 4px 10px; font-size: 12px; font-weight: 900; background: #eef4ff; color: #165dff; }
     .badge.raw { background: #fff7ed; color: #c2410c; }
     .badge.reviewed { background: #ecfdf5; color: #047857; }
@@ -54,7 +58,20 @@ ADMIN_STYLE = """
 """
 
 
-def _admin_nav(active: str) -> str:
+def _identity_bar(current_user: Optional[dict]) -> str:
+    if not current_user:
+        return ""
+    display_name = current_user.get("display_name") or current_user.get("username") or "User"
+    role = current_user.get("role") or ""
+    return f"""
+      <div class="identity" data-marker="phase29-user-identity">
+        <span>{display_name} · {role}</span>
+        <button class="logout" type="button" onclick="fetch('/api/auth/logout', {{method: 'POST'}}).finally(() => window.location.href='/login')">Logout</button>
+      </div>
+    """
+
+
+def _admin_nav(active: str, current_user: Optional[dict] = None) -> str:
     active_class = {
         "overview": "active" if active == "overview" else "",
         "classrooms": "active" if active == "classrooms" else "",
@@ -76,11 +93,12 @@ def _admin_nav(active: str) -> str:
         <a class="{active_class['ingestion']}" href="/admin/ingestion">Ingestion Status</a>
         <a href="/teacher">Teacher Console</a>
       </div>
+      {_identity_bar(current_user)}
     </nav>
     """
 
 
-def _shell(title: str, active: str, marker: str, body: str) -> str:
+def _shell(title: str, active: str, marker: str, body: str, current_user: Optional[dict] = None) -> str:
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -91,14 +109,14 @@ def _shell(title: str, active: str, marker: str, body: str) -> str:
 </head>
 <body>
   <div class="page" data-marker="{marker}">
-    {_admin_nav(active)}
+    {_admin_nav(active, current_user)}
     {body}
   </div>
 </body>
 </html>"""
 
 
-def build_admin_home_html() -> str:
+def build_admin_home_html(current_user: Optional[dict] = None) -> str:
     body = """
     <section class="hero">
       <p class="kicker">Admin Console</p>
@@ -162,10 +180,10 @@ def build_admin_home_html() -> str:
       loadAdminOverview();
     </script>
     """
-    return _shell("Admin Console", "overview", "admin-overview-page", body)
+    return _shell("Admin Console", "overview", "admin-overview-page", body, current_user)
 
 
-def build_admin_classrooms_html() -> str:
+def build_admin_classrooms_html(current_user: Optional[dict] = None) -> str:
     body = """
     <section class="hero">
       <p class="kicker">Classroom Overview</p>
@@ -208,10 +226,10 @@ def build_admin_classrooms_html() -> str:
       loadClassrooms();
     </script>
     """
-    return _shell("Admin Classrooms", "classrooms", "admin-classrooms-page", body)
+    return _shell("Admin Classrooms", "classrooms", "admin-classrooms-page", body, current_user)
 
 
-def build_admin_teachers_html() -> str:
+def build_admin_teachers_html(current_user: Optional[dict] = None) -> str:
     body = """
     <section class="hero">
       <p class="kicker">Teacher Overview</p>
@@ -250,10 +268,10 @@ def build_admin_teachers_html() -> str:
       loadTeachers();
     </script>
     """
-    return _shell("Admin Teachers", "teachers", "admin-teachers-page", body)
+    return _shell("Admin Teachers", "teachers", "admin-teachers-page", body, current_user)
 
 
-def build_admin_results_html() -> str:
+def build_admin_results_html(current_user: Optional[dict] = None) -> str:
     body = """
     <section class="hero">
       <p class="kicker">All Classroom Data</p>
@@ -309,10 +327,10 @@ def build_admin_results_html() -> str:
       (async function init() { try { await loadFilters(); applyForm(); await loadResults(); } catch (error) { document.getElementById("page-error").textContent = `Loading admin results failed: ${error}`; } })();
     </script>
     """
-    return _shell("Admin Results", "results", "admin-results-page", body)
+    return _shell("Admin Results", "results", "admin-results-page", body, current_user)
 
 
-def build_admin_ingestion_html() -> str:
+def build_admin_ingestion_html(current_user: Optional[dict] = None) -> str:
     body = """
     <section class="hero">
       <p class="kicker">Data Ingestion Status</p>
@@ -389,4 +407,4 @@ def build_admin_ingestion_html() -> str:
       loadIngestion();
     </script>
     """
-    return _shell("Admin Ingestion Status", "ingestion", "admin-ingestion-page", body)
+    return _shell("Admin Ingestion Status", "ingestion", "admin-ingestion-page", body, current_user)

@@ -9,12 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import Cookie, FastAPI, Header, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import settings
-from .auth import router as auth_router
+from .auth import AUTH_COOKIE_NAME, optional_page_user, require_page_user, router as auth_router
 from .admin_pages import (
     build_admin_classrooms_html,
     build_admin_home_html,
@@ -23,6 +23,7 @@ from .admin_pages import (
     build_admin_teachers_html,
 )
 from .dashboard_v11 import build_results_center_html, latest_result_or_404
+from .login_pages import build_forbidden_html, build_login_html
 from .logging_utils import setup_logging
 from .schemas_v11 import ApiResponse, InteractionResultPayload
 from .storage import FileResultRepository, build_query_repository
@@ -113,6 +114,52 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
+def _login_redirect() -> RedirectResponse:
+    return RedirectResponse(url="/login", status_code=302)
+
+
+def _forbidden_response() -> HTMLResponse:
+    return HTMLResponse(content=build_forbidden_html(), status_code=403)
+
+
+def _authorized_classroom_ids(user: Dict[str, Any]) -> Optional[set[str]]:
+    if user.get("role") == "admin":
+        return None
+    if not hasattr(repository, "get_workbench_classrooms"):
+        return set()
+    return {str(item.get("classroom_id")) for item in repository.get_workbench_classrooms(user_id=user.get("user_id")) if item.get("classroom_id")}
+
+
+def _dashboard_allowed(user: Dict[str, Any], classroom_id: Optional[str], result_id: Optional[str]) -> bool:
+    allowed = _authorized_classroom_ids(user)
+    if allowed is None:
+        return True
+    if result_id and hasattr(repository, "get_workbench_result_detail"):
+        detail = repository.get_workbench_result_detail(result_id)
+        if detail is None:
+            return True
+        return str(detail.get("classroom_id") or "") in allowed
+    if classroom_id:
+        return classroom_id in allowed
+    return True
+
+
+@app.get("/")
+async def root(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)):
+    user = optional_page_user(auth_token)
+    if not user:
+        return _login_redirect()
+    return RedirectResponse(url="/admin" if user.get("role") == "admin" else "/teacher", status_code=302)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)):
+    user = optional_page_user(auth_token)
+    if user:
+        return RedirectResponse(url="/admin" if user.get("role") == "admin" else "/teacher", status_code=302)
+    return HTMLResponse(content=build_login_html())
+
+
 @app.get("/api/latest-interaction-result")
 async def latest_interaction_result(classroom_id: Optional[str] = None) -> Dict[str, Any]:
     """Return the latest available classroom interaction result."""
@@ -159,10 +206,23 @@ async def dashboard(
     status: Optional[str] = None,
     result_id: Optional[str] = None,
     limit: int = Query(default=10, ge=1, le=100),
+    auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME),
 ) -> HTMLResponse:
     """Render a teacher-facing classroom results center."""
+    user = optional_page_user(auth_token)
+    if not user:
+        return _login_redirect()
+    if not _dashboard_allowed(user, classroom_id, result_id):
+        return _forbidden_response()
     if status not in (None, "", "raw", "reviewed", "archived"):
         raise HTTPException(status_code=400, detail="status must be raw, reviewed, or archived")
+    if user.get("role") == "teacher" and not classroom_id:
+        if result_id and hasattr(repository, "get_workbench_result_detail"):
+            detail = repository.get_workbench_result_detail(result_id)
+            classroom_id = (detail or {}).get("classroom_id") or classroom_id
+        if not classroom_id:
+            allowed = _authorized_classroom_ids(user) or set()
+            classroom_id = sorted(allowed)[0] if allowed else classroom_id
     payload, source_path, source_kind = latest_result_or_404(repository, classroom_id=classroom_id)
     recent_results = repository.recent_results(limit=limit, classroom_id=classroom_id, status=status)
     return HTMLResponse(
@@ -175,50 +235,79 @@ async def dashboard(
             status,
             limit,
             result_id,
+            user,
         )
     )
 
 
 @app.get("/teacher", response_class=HTMLResponse)
-async def teacher_home() -> HTMLResponse:
+async def teacher_home(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)) -> HTMLResponse:
     """Render the Phase 2.6 teacher home page."""
-    return HTMLResponse(content=build_teacher_home_html())
+    try:
+        user = require_page_user(auth_token, required_role="teacher")
+    except HTTPException as exc:
+        return _login_redirect() if exc.status_code == 401 else _forbidden_response()
+    return HTMLResponse(content=build_teacher_home_html(user))
 
 
 @app.get("/teacher/results", response_class=HTMLResponse)
-async def teacher_results_page() -> HTMLResponse:
+async def teacher_results_page(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)) -> HTMLResponse:
     """Render the Phase 2.6 classroom records center."""
-    return HTMLResponse(content=build_teacher_results_html())
+    try:
+        user = require_page_user(auth_token, required_role="teacher")
+    except HTTPException as exc:
+        return _login_redirect() if exc.status_code == 401 else _forbidden_response()
+    return HTMLResponse(content=build_teacher_results_html(user))
 
 
 @app.get("/admin", response_class=HTMLResponse)
-async def admin_home() -> HTMLResponse:
+async def admin_home(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)) -> HTMLResponse:
     """Render the Phase 2.7 admin platform overview."""
-    return HTMLResponse(content=build_admin_home_html())
+    try:
+        user = require_page_user(auth_token, required_role="admin")
+    except HTTPException as exc:
+        return _login_redirect() if exc.status_code == 401 else _forbidden_response()
+    return HTMLResponse(content=build_admin_home_html(user))
 
 
 @app.get("/admin/classrooms", response_class=HTMLResponse)
-async def admin_classrooms_page() -> HTMLResponse:
+async def admin_classrooms_page(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)) -> HTMLResponse:
     """Render the Phase 2.7 admin classroom overview."""
-    return HTMLResponse(content=build_admin_classrooms_html())
+    try:
+        user = require_page_user(auth_token, required_role="admin")
+    except HTTPException as exc:
+        return _login_redirect() if exc.status_code == 401 else _forbidden_response()
+    return HTMLResponse(content=build_admin_classrooms_html(user))
 
 
 @app.get("/admin/teachers", response_class=HTMLResponse)
-async def admin_teachers_page() -> HTMLResponse:
+async def admin_teachers_page(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)) -> HTMLResponse:
     """Render the Phase 2.7 admin teacher overview."""
-    return HTMLResponse(content=build_admin_teachers_html())
+    try:
+        user = require_page_user(auth_token, required_role="admin")
+    except HTTPException as exc:
+        return _login_redirect() if exc.status_code == 401 else _forbidden_response()
+    return HTMLResponse(content=build_admin_teachers_html(user))
 
 
 @app.get("/admin/results", response_class=HTMLResponse)
-async def admin_results_page() -> HTMLResponse:
+async def admin_results_page(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)) -> HTMLResponse:
     """Render the Phase 2.7 all-platform classroom results view."""
-    return HTMLResponse(content=build_admin_results_html())
+    try:
+        user = require_page_user(auth_token, required_role="admin")
+    except HTTPException as exc:
+        return _login_redirect() if exc.status_code == 401 else _forbidden_response()
+    return HTMLResponse(content=build_admin_results_html(user))
 
 
 @app.get("/admin/ingestion", response_class=HTMLResponse)
-async def admin_ingestion_page() -> HTMLResponse:
+async def admin_ingestion_page(auth_token: Optional[str] = Cookie(default=None, alias=AUTH_COOKIE_NAME)) -> HTMLResponse:
     """Render the Phase 2.8 three-side ingestion status view."""
-    return HTMLResponse(content=build_admin_ingestion_html())
+    try:
+        user = require_page_user(auth_token, required_role="admin")
+    except HTTPException as exc:
+        return _login_redirect() if exc.status_code == 401 else _forbidden_response()
+    return HTMLResponse(content=build_admin_ingestion_html(user))
 
 
 @app.post("/api/interaction-results", response_model=ApiResponse)
