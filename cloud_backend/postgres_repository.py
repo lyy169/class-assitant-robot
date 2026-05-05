@@ -10,6 +10,7 @@ import psycopg2
 import psycopg2.extras
 
 from .config import Settings
+from .reporting import build_rule_report
 from .storage import FileResultRepository
 
 
@@ -545,6 +546,126 @@ class PostgreSQLResultRepository:
             "total": total,
         }
 
+    def get_phase3_teacher_trends(
+        self,
+        user_id: Optional[str] = None,
+        classroom_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        data_source: str = "real",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        normalized_source = self._normalize_data_source(data_source)
+        normalized_limit = max(1, min(int(limit or 20), 100))
+        rows = self._phase3_result_rows(
+            user_id=user_id,
+            classroom_id=classroom_id,
+            date_from=date_from,
+            date_to=date_to,
+            data_source=normalized_source,
+            limit=normalized_limit,
+        )
+        lessons = [self._row_to_phase3_lesson(row) for row in rows]
+        lessons.sort(key=lambda item: str(item.get("created_at") or ""), reverse=False)
+        overview = self._phase3_overview(lessons)
+        return {
+            "success": True,
+            "filters": {
+                "classroom_id": classroom_id or "",
+                "date_from": date_from or "",
+                "date_to": date_to or "",
+                "data_source": normalized_source,
+                "limit": normalized_limit,
+            },
+            "overview": overview,
+            "series": self._phase3_series(lessons),
+            "stage_distribution": self._phase3_stage_average(lessons),
+            "risk_lessons": [item for item in reversed(lessons) if item.get("risk_level") in {"medium", "high"}][:8],
+            "recommendations": self._phase3_recommendations(lessons),
+            "data_quality": self._phase3_data_quality(lessons, normalized_source),
+        }
+
+    def get_phase3_teacher_reports(
+        self,
+        user_id: Optional[str] = None,
+        classroom_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        data_source: str = "real",
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        normalized_source = self._normalize_data_source(data_source)
+        normalized_limit = max(1, min(int(limit or 20), 100))
+        rows = self._phase3_result_rows(
+            user_id=user_id,
+            classroom_id=classroom_id,
+            date_from=date_from,
+            date_to=date_to,
+            data_source=normalized_source,
+            limit=normalized_limit,
+        )
+        items = [self._row_to_phase3_report_item(row) for row in rows]
+        return {
+            "success": True,
+            "filters": {
+                "classroom_id": classroom_id or "",
+                "date_from": date_from or "",
+                "date_to": date_to or "",
+                "data_source": normalized_source,
+                "limit": normalized_limit,
+            },
+            "items": items,
+            "total": len(items),
+        }
+
+    def get_phase3_teacher_report_detail(
+        self,
+        result_id: str,
+        user_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        rows = self._phase3_result_rows(user_id=user_id, result_id=result_id, data_source="all", limit=1)
+        if not rows:
+            return None
+        return self._row_to_phase3_report_detail(rows[0])
+
+    def get_phase3_admin_trends(
+        self,
+        classroom_id: Optional[str] = None,
+        teacher_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        data_source: str = "real",
+        limit: int = 30,
+    ) -> Dict[str, Any]:
+        normalized_source = self._normalize_data_source(data_source)
+        normalized_limit = max(1, min(int(limit or 30), 100))
+        rows = self._phase3_result_rows(
+            classroom_id=classroom_id,
+            teacher_id=teacher_id,
+            date_from=date_from,
+            date_to=date_to,
+            data_source=normalized_source,
+            limit=normalized_limit,
+        )
+        lessons = [self._row_to_phase3_lesson(row) for row in rows]
+        return {
+            "success": True,
+            "filters": {
+                "classroom_id": classroom_id or "",
+                "teacher_id": teacher_id or "",
+                "date_from": date_from or "",
+                "date_to": date_to or "",
+                "data_source": normalized_source,
+                "limit": normalized_limit,
+            },
+            "overview": self._phase3_overview(lessons),
+            "classroom_rankings": self._phase3_classroom_rankings(lessons),
+            "teacher_activity": self._phase3_teacher_activity(lessons),
+            "risk_lessons": [item for item in lessons if item.get("risk_level") in {"medium", "high"}][:10],
+            "recent_reports": [self._phase3_lesson_to_report_summary(item) for item in lessons[:10]],
+            "data_quality": self._phase3_data_quality(lessons, normalized_source),
+        }
+
     def get_admin_overview(self) -> Dict[str, Any]:
         rows = self._admin_result_rows(limit=500, offset=0)
         items = [self._row_to_admin_result_item(row) for row in rows]
@@ -845,6 +966,74 @@ class PostgreSQLResultRepository:
                     {where_clause}
                     ORDER BY COALESCE(ar.created_at, ar.generated_at, s.generated_at) DESC NULLS LAST
                     LIMIT %s OFFSET %s
+                    """,
+                    tuple(params),
+                )
+                return [dict(row) for row in cursor.fetchall()]
+
+    def _phase3_result_rows(
+        self,
+        user_id: Optional[str] = None,
+        classroom_id: Optional[str] = None,
+        teacher_id: Optional[str] = None,
+        result_id: Optional[str] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        data_source: str = "real",
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        self.ensure_phase2_schema()
+        normalized_source = self._normalize_data_source(data_source)
+        filters = ["COALESCE(ar.status, 'raw') IN ('raw', 'reviewed')"]
+        params: List[Any] = []
+        if user_id is not None:
+            filters.append("tc.user_id::text = %s")
+            params.append(str(user_id))
+        if classroom_id:
+            filters.append("ar.classroom_id = %s")
+            params.append(classroom_id)
+        if teacher_id:
+            filters.append("tc.user_id::text = %s")
+            params.append(str(teacher_id))
+        if result_id:
+            filters.append("ar.analysis_id = %s")
+            params.append(str(result_id))
+        if date_from:
+            filters.append("COALESCE(ar.created_at, ar.generated_at, s.generated_at)::date >= %s::date")
+            params.append(date_from)
+        if date_to:
+            filters.append("COALESCE(ar.created_at, ar.generated_at, s.generated_at)::date <= %s::date")
+            params.append(date_to)
+        if normalized_source == "real":
+            filters.append("COALESCE(NULLIF(ar.payload_json->'dataset'->>'source', ''), 'real') = 'real'")
+        elif normalized_source == "demo":
+            filters.append("ar.payload_json->'dataset'->>'source' = 'demo'")
+        elif normalized_source == "all":
+            filters.append("COALESCE(NULLIF(ar.payload_json->'dataset'->>'source', ''), 'real') IN ('real', 'demo')")
+        where_clause = "WHERE " + " AND ".join(filters)
+        params.append(max(1, min(int(limit or 20), 1000)))
+        with self._connect() as connection:
+            with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(
+                    f"""
+                    SELECT
+                        ar.*,
+                        c.name AS mapped_classroom_name,
+                        tc.user_id::text AS teacher_user_id,
+                        u.username AS teacher_username,
+                        u.display_name AS teacher_display_name,
+                        s.recorded_at AS session_recorded_at,
+                        s.generated_at AS session_generated_at,
+                        s.duration_seconds AS session_duration_seconds,
+                        s.video_id AS session_video_id
+                    FROM analysis_results ar
+                    LEFT JOIN sessions s ON s.analysis_id = ar.analysis_id
+                    LEFT JOIN classrooms c ON c.classroom_id = ar.classroom_id
+                    LEFT JOIN teacher_classrooms tc ON tc.classroom_id = ar.classroom_id
+                    LEFT JOIN users u ON u.user_id = tc.user_id
+                    {where_clause}
+                    ORDER BY COALESCE(ar.created_at, ar.generated_at, s.generated_at) DESC NULLS LAST
+                    LIMIT %s
                     """,
                     tuple(params),
                 )
@@ -1243,6 +1432,251 @@ class PostgreSQLResultRepository:
             hints.append({"type": "metadata_ready", "severity": "ok", "message": "Current ingestion metadata is sufficient for cloud-side traceability."})
         return hints
 
+    def _row_to_phase3_lesson(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        detail = self._row_to_workbench_detail(row)
+        payload = detail.get("raw_payload") or {}
+        summary = detail.get("summary") or {}
+        timeline = detail.get("timeline") or {}
+        stage = detail.get("stage_distribution") or {}
+        events = detail.get("events") or []
+        teacher = payload.get("teacher") or {}
+        students = payload.get("students") or {}
+        dataset_source = self._dataset_source(payload)
+        score = self._number_value(summary.get("feedback_score"), row.get("feedback_score"), payload.get("score"), payload.get("overall_score"))
+        attention_score = self._number_value(summary.get("attention_score"), row.get("attention_score"), summary.get("avg_attention_ratio") * 100 if summary.get("avg_attention_ratio") else None)
+        activity_score = self._activity_score(payload, timeline, students)
+        question_events = teacher.get("question_events") or payload.get("question_events") or []
+        question_count = int(self._number_value(summary.get("teacher_question_count"), len(question_events)))
+        response_rate = self._number_value(summary.get("response_success_rate"), payload.get("response_rate"))
+        if response_rate > 1:
+            response_rate = response_rate / 100.0
+        issue_count = len(payload.get("issues") or []) + len([event for event in events if event.get("event_type") not in {"question", "unknown"}])
+        metrics = {
+            "score": score,
+            "attention_score": attention_score,
+            "activity_score": activity_score,
+            "question_count": question_count,
+            "response_rate": response_rate,
+            "management_ratio": stage.get("management_ratio"),
+            "issue_count": issue_count,
+        }
+        rule = build_rule_report(metrics)
+        created_at = self._as_iso(row.get("created_at")) or self._as_iso(row.get("generated_at")) or self._as_iso(row.get("session_generated_at"))
+        return {
+            "result_id": detail.get("analysis_id") or row.get("analysis_id"),
+            "analysis_id": detail.get("analysis_id") or row.get("analysis_id"),
+            "classroom_id": detail.get("classroom_id") or row.get("classroom_id") or "unknown",
+            "classroom_name": detail.get("classroom_name") or row.get("mapped_classroom_name") or row.get("classroom_id") or "unknown",
+            "teacher_id": str(row.get("teacher_user_id") or "demo"),
+            "teacher_name": row.get("teacher_display_name") or row.get("teacher_username") or "Demo Teacher",
+            "lesson_title": detail.get("lesson_title") or row.get("lesson_title") or "Untitled Lesson",
+            "created_at": created_at,
+            "score": round(score, 2),
+            "attention_score": round(attention_score, 2),
+            "activity_score": round(activity_score, 2),
+            "question_count": question_count,
+            "response_rate": round(response_rate, 3),
+            "discussion_ratio": self._ratio_value(stage.get("discussion_ratio")),
+            "exposition_ratio": self._ratio_value(stage.get("exposition_ratio")),
+            "management_ratio": self._ratio_value(stage.get("management_ratio")),
+            "summary_ratio": self._ratio_value(stage.get("summary_ratio")),
+            "issue_count": issue_count,
+            "event_count": len(events),
+            "dataset_source": dataset_source,
+            "risk_level": rule["risk_level"],
+            "detail_url": f"/dashboard?result_id={detail.get('analysis_id') or row.get('analysis_id')}",
+            "report_url": f"/teacher/reports?result_id={detail.get('analysis_id') or row.get('analysis_id')}",
+        }
+
+    def _row_to_phase3_report_item(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        item = self._row_to_phase3_lesson(row)
+        return {
+            **item,
+            "dashboard_url": item["detail_url"],
+        }
+
+    def _row_to_phase3_report_detail(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        lesson = self._row_to_phase3_lesson(row)
+        detail = self._row_to_workbench_detail(row)
+        payload = detail.get("raw_payload") or {}
+        timeline = detail.get("timeline") or {}
+        stage = detail.get("stage_distribution") or {}
+        events = detail.get("events") or []
+        rule = build_rule_report(lesson)
+        enhanced_fields = self._phase32_enhanced_fields(payload)
+        report = {
+            "basic": {
+                "result_id": lesson["result_id"],
+                "classroom_id": lesson["classroom_id"],
+                "classroom_name": lesson["classroom_name"],
+                "teacher_name": lesson["teacher_name"],
+                "lesson_title": lesson["lesson_title"],
+                "created_at": lesson["created_at"],
+                "status": detail.get("status") or "raw",
+            },
+            "scores": {
+                "overall_score": lesson["score"],
+                "attention_score": lesson["attention_score"],
+                "activity_score": lesson["activity_score"],
+                "response_rate": lesson["response_rate"],
+            },
+            "timeline": {
+                "attention_curve": timeline.get("attention_curve") or [],
+                "activity_curve": timeline.get("activity_curve") or [],
+                "heat_curve": timeline.get("heat_curve") or [],
+            },
+            "stage_distribution": stage,
+            "question_analysis": {
+                "question_count": lesson["question_count"],
+                "response_rate": lesson["response_rate"],
+                "events": [event for event in events if event.get("question_type") or event.get("event_type") == "question"],
+            },
+            "issues": [event for event in events if event.get("event_type") not in {"question", "unknown"}],
+            "highlights": rule["highlights"],
+            "risks": rule["risks"],
+            "recommendations": rule["recommendations"],
+            "risk_level": rule["risk_level"],
+            "ai_summary": {"enabled": False, "status": "not_configured", "content": ""},
+            "dataset_source": lesson["dataset_source"],
+            "dashboard_url": lesson["detail_url"],
+        }
+        if enhanced_fields:
+            report["phase32"] = enhanced_fields
+            report["enhanced_issues"] = enhanced_fields.get("enhanced_issues") or []
+            report["quality_metrics"] = enhanced_fields.get("quality_metrics") or {}
+            report["score_breakdown"] = enhanced_fields.get("score_breakdown") or {}
+        return report
+
+    def _phase3_overview(self, lessons: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "lesson_count": len(lessons),
+            "avg_score": self._average_metric(lessons, "score"),
+            "avg_attention_score": self._average_metric(lessons, "attention_score"),
+            "avg_activity_score": self._average_metric(lessons, "activity_score"),
+            "avg_response_rate": self._average_metric(lessons, "response_rate"),
+            "risk_lesson_count": len([item for item in lessons if item.get("risk_level") in {"medium", "high"}]),
+            "high_risk_count": len([item for item in lessons if item.get("risk_level") == "high"]),
+        }
+
+    def _phase3_series(self, lessons: List[Dict[str, Any]]) -> Dict[str, Any]:
+        labels = [str(item.get("created_at") or "")[:10] for item in lessons]
+        return {
+            "labels": labels,
+            "score": [item.get("score") for item in lessons],
+            "attention_score": [item.get("attention_score") for item in lessons],
+            "activity_score": [item.get("activity_score") for item in lessons],
+            "question_count": [item.get("question_count") for item in lessons],
+            "response_rate": [item.get("response_rate") for item in lessons],
+        }
+
+    def _phase3_stage_average(self, lessons: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            key: self._average_metric(lessons, key)
+            for key in ["discussion_ratio", "exposition_ratio", "management_ratio", "summary_ratio"]
+        }
+
+    def _phase3_recommendations(self, lessons: List[Dict[str, Any]]) -> List[str]:
+        recommendations: List[str] = []
+        for item in lessons:
+            recommendations.extend(build_rule_report(item)["recommendations"])
+        if not recommendations:
+            return ["真实数据不足时，建议先完成多节课上传，再观察趋势变化。"]
+        seen = set()
+        result = []
+        for recommendation in recommendations:
+            if recommendation in seen:
+                continue
+            seen.add(recommendation)
+            result.append(recommendation)
+        return result[:6]
+
+    def _phase3_data_quality(self, lessons: List[Dict[str, Any]], data_source: str) -> Dict[str, Any]:
+        source_counts: Dict[str, int] = {}
+        for item in lessons:
+            source = item.get("dataset_source") or "unknown"
+            source_counts[source] = source_counts.get(source, 0) + 1
+        return {
+            "data_source": data_source,
+            "source_counts": source_counts,
+            "insufficient_real_data": data_source == "real" and len(lessons) < 2,
+            "demo_warning": data_source in {"demo", "all"},
+        }
+
+    def _phase3_classroom_rankings(self, lessons: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for item in lessons:
+            classroom_id = item.get("classroom_id") or "unknown"
+            group = grouped.setdefault(classroom_id, {"classroom_id": classroom_id, "classroom_name": item.get("classroom_name"), "lesson_count": 0, "_scores": []})
+            group["lesson_count"] += 1
+            group["_scores"].append(item.get("score"))
+        result = []
+        for group in grouped.values():
+            scores = [float(value) for value in group.pop("_scores") if value is not None]
+            group["avg_score"] = round(sum(scores) / len(scores), 2) if scores else None
+            result.append(group)
+        return sorted(result, key=lambda item: item.get("avg_score") or 0, reverse=True)[:10]
+
+    def _phase3_teacher_activity(self, lessons: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for item in lessons:
+            teacher_id = item.get("teacher_id") or "demo"
+            group = grouped.setdefault(teacher_id, {"teacher_id": teacher_id, "teacher_name": item.get("teacher_name"), "lesson_count": 0, "_scores": []})
+            group["lesson_count"] += 1
+            group["_scores"].append(item.get("score"))
+        result = []
+        for group in grouped.values():
+            scores = [float(value) for value in group.pop("_scores") if value is not None]
+            group["avg_score"] = round(sum(scores) / len(scores), 2) if scores else None
+            result.append(group)
+        return sorted(result, key=lambda item: (item.get("lesson_count") or 0, item.get("avg_score") or 0), reverse=True)[:10]
+
+    def _phase3_lesson_to_report_summary(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "result_id": item.get("result_id"),
+            "classroom_name": item.get("classroom_name"),
+            "teacher_name": item.get("teacher_name"),
+            "lesson_title": item.get("lesson_title"),
+            "score": item.get("score"),
+            "risk_level": item.get("risk_level"),
+            "dataset_source": item.get("dataset_source"),
+            "report_url": item.get("report_url"),
+            "dashboard_url": item.get("detail_url"),
+        }
+
+    def _dataset_source(self, payload: Dict[str, Any]) -> str:
+        dataset = payload.get("dataset") or {}
+        source = str(dataset.get("source") or "real").strip().lower()
+        if source in {"real", "demo"}:
+            return source
+        return "unknown"
+
+    def _normalize_data_source(self, data_source: Optional[str]) -> str:
+        normalized = str(data_source or "real").strip().lower()
+        if normalized not in {"real", "demo", "all"}:
+            return "real"
+        return normalized
+
+    def _activity_score(self, payload: Dict[str, Any], timeline: Dict[str, Any], students: Dict[str, Any]) -> float:
+        activity_curve = timeline.get("activity_curve") or []
+        if activity_curve:
+            values = [self._number_value(value) for value in activity_curve]
+            avg = sum(values) / len(values)
+            return avg * 100 if avg <= 1 else avg
+        zones = (students.get("zones") or {}) if isinstance(students, dict) else {}
+        zone_values = [
+            self._number_value((zones.get(zone) or {}).get("active_ratio"))
+            for zone in ["front", "middle", "back"]
+            if (zones.get(zone) or {}).get("active_ratio") is not None
+        ]
+        if zone_values:
+            avg = sum(zone_values) / len(zone_values)
+            return avg * 100 if avg <= 1 else avg
+        return 0.0
+
+    def _ratio_value(self, value: Any) -> float:
+        number = self._number_value(value)
+        return number / 100.0 if number > 1 else number
+
     def _teacher_context(self, user_id: Optional[str]) -> Dict[str, Any]:
         if user_id is None:
             return {"id": None, "username": "demo_teacher", "display_name": "Demo Teacher", "role": "teacher"}
@@ -1506,9 +1940,26 @@ class PostgreSQLResultRepository:
                 "result": payload,
             }
         )
+        enhanced_fields = self._phase32_enhanced_fields(payload)
+        if enhanced_fields:
+            item.update(enhanced_fields)
+            item["phase32"] = enhanced_fields
         if not item.get("classroom_name"):
             item["classroom_name"] = row.get("mapped_classroom_name") or item.get("classroom_id") or "unknown"
         return item
+
+    def _phase32_enhanced_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        keys = [
+            "analysis_version",
+            "algorithm_profile",
+            "quality_metrics",
+            "score_breakdown",
+            "curve_metadata",
+            "evidence_summary",
+            "enhanced_events",
+            "enhanced_issues",
+        ]
+        return {key: payload.get(key) for key in keys if payload.get(key) not in (None, "", [], {})}
 
     def _display_summary(self, payload: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
         summary = payload.get("summary") or {}

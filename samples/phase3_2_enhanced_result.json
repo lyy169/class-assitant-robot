@@ -1,0 +1,142 @@
+{
+  "schema_version": "v1.1",
+  "analysis_id": "phase3_2_enhanced_sample_001",
+  "classroom_id": "classroom_101",
+  "video_id": "phase3_2_demo_video_001",
+  "source": {
+    "source_kind": "phase3_2_sample",
+    "source_path": "samples/phase3_2_enhanced_result.json",
+    "source_host": "local-analysis-demo"
+  },
+  "time": {
+    "recorded_at": "2026-05-05T09:00:00Z",
+    "generated_at": "2026-05-05T09:12:00Z",
+    "duration_seconds": 2400
+  },
+  "summary": {
+    "feedback_score": 82,
+    "attention_score": 78,
+    "response_score": 74,
+    "teacher_question_count": 8,
+    "avg_attention_ratio": 0.78,
+    "response_success_rate": 0.72,
+    "summary_text": "Phase 3.2 enhanced JSON cloud compatibility sample. This payload is marked as demo/sample data."
+  },
+  "teacher": {
+    "question_events": [
+      {
+        "event_id": "q001",
+        "start_sec": 420,
+        "end_sec": 455,
+        "text": "教师围绕例题发起追问，学生响应较积极。",
+        "question_type": "guiding"
+      },
+      {
+        "event_id": "q002",
+        "start_sec": 1180,
+        "end_sec": 1215,
+        "text": "教师要求学生解释解题思路。",
+        "question_type": "reasoning"
+      }
+    ],
+    "stage_distribution": {
+      "exposition_ratio": 0.36,
+      "question_ratio": 0.24,
+      "discussion_ratio": 0.18,
+      "summary_ratio": 0.14,
+      "management_ratio": 0.08
+    }
+  },
+  "students": {
+    "estimated_student_count": 32,
+    "hand_raise_event_count": 6,
+    "zones": {
+      "front": {
+        "avg_attention_ratio": 0.82,
+        "active_ratio": 0.68
+      },
+      "middle": {
+        "avg_attention_ratio": 0.78,
+        "active_ratio": 0.63
+      },
+      "back": {
+        "avg_attention_ratio": 0.69,
+        "active_ratio": 0.48
+      }
+    }
+  },
+  "timeline": {
+    "window_size_seconds": 60,
+    "attention_curve": [0.74, 0.78, 0.81, 0.79, 0.72, 0.68, 0.75, 0.8],
+    "heat_curve": [0.55, 0.58, 0.63, 0.61, 0.52, 0.47, 0.57, 0.64],
+    "activity_curve": [0.48, 0.52, 0.61, 0.66, 0.54, 0.49, 0.58, 0.62]
+  },
+  "dataset": {
+    "source": "demo",
+    "purpose": "phase3_2_cloud_compat_sample"
+  },
+  "lesson_title": "Phase 3.2 增强 JSON 兼容样例课",
+  "teacher_name": "演示教师",
+  "analysis_version": "3.2",
+  "algorithm_profile": {
+    "detector": "classroom-behavior-demo",
+    "behavior_model": "phase3_2_sample_profile"
+  },
+  "quality_metrics": {
+    "data_confidence": 0.86,
+    "video_quality": "usable",
+    "audio_quality": "partial",
+    "timeline_coverage": 0.92
+  },
+  "score_breakdown": {
+    "attention": 78,
+    "activity": 70,
+    "interaction": 74,
+    "rhythm": 80,
+    "evidence": 86
+  },
+  "curve_metadata": {
+    "window_seconds": 60,
+    "smoothing": "moving_average",
+    "sample_count": 8
+  },
+  "evidence_summary": {
+    "video_path_present": true,
+    "standardized_video_present": true,
+    "keyframe_count": 12,
+    "audio_present": true,
+    "transcript_present": false
+  },
+  "enhanced_events": [
+    {
+      "event_id": "e001",
+      "type": "engagement_drop",
+      "start_sec": 1500,
+      "end_sec": 1650,
+      "evidence": "后排区域专注度短时下降。"
+    }
+  ],
+  "enhanced_issues": [
+    {
+      "label": "后排参与低谷",
+      "severity": "medium",
+      "reason": "课程中段后排专注度和活跃度同时下降。",
+      "evidence": "attention_curve 第 6 个窗口低于 0.70，后排 active_ratio 为 0.48。",
+      "suggestion": "在讲授中段增加一次面向后排的小组讨论或点名追问。"
+    },
+    {
+      "label": "响应等待时间可优化",
+      "severity": "low",
+      "reason": "部分推理型提问后学生响应质量一般。",
+      "evidence": "response_success_rate 为 0.72，低于本节课总体反馈分。",
+      "suggestion": "关键问题后适当延长等待时间，并补充追问引导。"
+    },
+    {
+      "label": "音频证据不完整",
+      "severity": "low",
+      "reason": "音频质量为 partial，转写暂未接入。",
+      "evidence": "evidence_summary.audio_present=true，transcript_present=false。",
+      "suggestion": "复盘时以视频和行为曲线为主，后续再补充音频转写证据。"
+    }
+  ]
+}
