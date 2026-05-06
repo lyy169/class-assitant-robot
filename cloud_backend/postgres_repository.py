@@ -1504,6 +1504,7 @@ class PostgreSQLResultRepository:
         events = detail.get("events") or []
         rule = build_rule_report(lesson)
         enhanced_fields = self._phase32_enhanced_fields(payload)
+        question_guidance = self._phase33_question_guidance_fields(payload)
         report = {
             "basic": {
                 "result_id": lesson["result_id"],
@@ -1545,6 +1546,10 @@ class PostgreSQLResultRepository:
             report["enhanced_issues"] = enhanced_fields.get("enhanced_issues") or []
             report["quality_metrics"] = enhanced_fields.get("quality_metrics") or {}
             report["score_breakdown"] = enhanced_fields.get("score_breakdown") or {}
+        if question_guidance:
+            report["phase33"] = question_guidance
+            report["teacher_question_events"] = question_guidance.get("teacher_question_events") or []
+            report["question_guidance_summary"] = question_guidance.get("question_guidance_summary") or {}
         return report
 
     def _phase3_overview(self, lessons: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1944,6 +1949,10 @@ class PostgreSQLResultRepository:
         if enhanced_fields:
             item.update(enhanced_fields)
             item["phase32"] = enhanced_fields
+        question_guidance = self._phase33_question_guidance_fields(payload)
+        if question_guidance:
+            item.update(question_guidance)
+            item["phase33"] = question_guidance
         if not item.get("classroom_name"):
             item["classroom_name"] = row.get("mapped_classroom_name") or item.get("classroom_id") or "unknown"
         return item
@@ -1958,6 +1967,13 @@ class PostgreSQLResultRepository:
             "evidence_summary",
             "enhanced_events",
             "enhanced_issues",
+        ]
+        return {key: payload.get(key) for key in keys if payload.get(key) not in (None, "", [], {})}
+
+    def _phase33_question_guidance_fields(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        keys = [
+            "teacher_question_events",
+            "question_guidance_summary",
         ]
         return {key: payload.get(key) for key in keys if payload.get(key) not in (None, "", [], {})}
 

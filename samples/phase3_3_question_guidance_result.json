@@ -1,0 +1,150 @@
+{
+  "schema_version": "v1.1",
+  "analysis_id": "phase3_3_question_guidance_sample_001",
+  "classroom_id": "classroom_101",
+  "video_id": "phase3_3_demo_video_001",
+  "source": {
+    "source_kind": "phase3_3_sample",
+    "source_path": "samples/phase3_3_question_guidance_result.json",
+    "source_host": "local-analysis-demo"
+  },
+  "time": {
+    "recorded_at": "2026-05-06T09:00:00Z",
+    "generated_at": "2026-05-06T09:10:00Z",
+    "duration_seconds": 2400
+  },
+  "summary": {
+    "feedback_score": 84,
+    "attention_score": 80,
+    "response_score": 76,
+    "teacher_question_count": 9,
+    "avg_attention_ratio": 0.8,
+    "response_success_rate": 0.76,
+    "summary_text": "Phase 3.3 teacher question guidance cloud compatibility sample. This payload is marked as demo/sample data."
+  },
+  "teacher": {
+    "question_events": [
+      {
+        "event_id": "q001",
+        "start_sec": 360,
+        "end_sec": 390,
+        "text": "教师提出开放性问题，引导学生解释解题思路。",
+        "question_type": "open"
+      },
+      {
+        "event_id": "q002",
+        "start_sec": 980,
+        "end_sec": 1010,
+        "text": "教师检查学生对关键概念的理解。",
+        "question_type": "check"
+      }
+    ],
+    "stage_distribution": {
+      "exposition_ratio": 0.34,
+      "question_ratio": 0.26,
+      "discussion_ratio": 0.18,
+      "summary_ratio": 0.14,
+      "management_ratio": 0.08
+    }
+  },
+  "students": {
+    "estimated_student_count": 32,
+    "hand_raise_event_count": 7,
+    "zones": {
+      "front": {
+        "avg_attention_ratio": 0.84,
+        "active_ratio": 0.7
+      },
+      "middle": {
+        "avg_attention_ratio": 0.8,
+        "active_ratio": 0.66
+      },
+      "back": {
+        "avg_attention_ratio": 0.72,
+        "active_ratio": 0.52
+      }
+    }
+  },
+  "timeline": {
+    "window_size_seconds": 60,
+    "attention_curve": [0.76, 0.8, 0.84, 0.82, 0.75, 0.72, 0.79, 0.83],
+    "heat_curve": [0.56, 0.61, 0.67, 0.64, 0.55, 0.5, 0.6, 0.66],
+    "activity_curve": [0.5, 0.56, 0.64, 0.68, 0.58, 0.53, 0.62, 0.67]
+  },
+  "dataset": {
+    "source": "demo",
+    "purpose": "phase3_3_question_guidance_sample"
+  },
+  "lesson_title": "Phase 3.3 教师提问引导兼容样例课",
+  "teacher_name": "演示教师",
+  "teacher_question_events": [
+    {
+      "event_id": "tq001",
+      "start_sec": 360,
+      "end_sec": 390,
+      "text": "你能说明为什么这里要先化简吗？",
+      "question_type": "open",
+      "stage": "early",
+      "response_signal": "多名学生举手，前排响应积极",
+      "guidance": "保留开放性追问，并邀请中后排学生补充理由。"
+    },
+    {
+      "event_id": "tq002",
+      "start_sec": 980,
+      "end_sec": 1010,
+      "text": "这个公式适用的条件是什么？",
+      "question_type": "check",
+      "stage": "middle",
+      "response_signal": "学生回答较快，但解释不完整",
+      "guidance": "检查理解后增加一次追问，让学生说明条件来源。"
+    },
+    {
+      "event_id": "tq003",
+      "start_sec": 1680,
+      "end_sec": 1715,
+      "text": "如果把题目条件换成另一组数，解法会变吗？",
+      "question_type": "reasoning",
+      "stage": "late",
+      "response_signal": "少数学生参与，后排响应偏弱",
+      "guidance": "在总结前设置同伴讨论，降低推理问题的响应门槛。"
+    }
+  ],
+  "question_guidance_summary": {
+    "source": "demo_seed",
+    "status": "demo",
+    "question_count": 9,
+    "guidance_score": 82,
+    "question_distribution": {
+      "open": 4,
+      "closed": 2,
+      "check": 3
+    },
+    "stage_coverage": {
+      "early": 3,
+      "middle": 4,
+      "late": 2
+    },
+    "response_signal_summary": "开放性问题能带动前排和中排响应，后段推理追问的后排参与偏弱。",
+    "main_issue": "后段推理型提问参与面不足。",
+    "evidence": "late 阶段仅 2 次提问，tq003 的 response_signal 显示后排响应偏弱。",
+    "suggestion": "在推理追问前增加 30 秒同伴讨论，并点名邀请中后排学生补充理由。",
+    "top_examples": [
+      {
+        "event_id": "tq001",
+        "start_sec": 360,
+        "text": "你能说明为什么这里要先化简吗？",
+        "question_type": "open",
+        "response_signal": "多名学生举手",
+        "suggestion": "邀请中后排学生补充理由。"
+      },
+      {
+        "event_id": "tq003",
+        "start_sec": 1680,
+        "text": "如果把题目条件换成另一组数，解法会变吗？",
+        "question_type": "reasoning",
+        "response_signal": "少数学生参与",
+        "suggestion": "先同伴讨论，再追问解法变化。"
+      }
+    ]
+  }
+}

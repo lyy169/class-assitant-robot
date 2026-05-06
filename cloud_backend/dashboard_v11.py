@@ -252,6 +252,67 @@ def build_results_center_html(
           </div>
         </div>
       </section>
+      <section v-if="hasQuestionGuidance" class="card insight-card" data-marker="phase33-question-guidance">
+        <div class="section-title">
+          <div>
+            <p class="section-kicker">Phase 3.3 提问引导</p>
+            <h2>教师提问与课堂引导证据</h2>
+            <p class="muted">本区仅在上传 JSON 包含 teacher_question_events 或 question_guidance_summary 时展示；旧数据缺字段时不影响课堂分析。</p>
+          </div>
+          <span v-if="questionGuidanceDemo" class="badge sample">演示数据</span>
+        </div>
+        <div class="grid">
+          <div class="metric">
+            <span>提问数量</span>
+            <strong v-text="questionGuidanceCount"></strong>
+          </div>
+          <div class="metric">
+            <span>引导评分</span>
+            <strong v-text="formatInline(questionGuidance.summary.guidance_score || questionGuidance.summary.score)"></strong>
+          </div>
+          <div class="metric">
+            <span>响应信号</span>
+            <strong v-text="formatInline(questionGuidance.summary.response_signal_summary || questionGuidance.summary.response_signal)"></strong>
+          </div>
+        </div>
+        <div class="grid">
+          <div class="record">
+            <strong>开放 / 封闭 / 检查分布</strong>
+            <p v-for="entry in questionDistributionEntries" :key="entry.key">
+              <span class="muted" v-text="entry.label"></span>：<span v-text="entry.value"></span>
+            </p>
+            <p v-if="!questionDistributionEntries.length" class="muted">暂无提问类型分布。</p>
+          </div>
+          <div class="record">
+            <strong>前 / 中 / 后覆盖</strong>
+            <p v-for="entry in questionCoverageEntries" :key="entry.key">
+              <span class="muted" v-text="entry.label"></span>：<span v-text="entry.value"></span>
+            </p>
+            <p v-if="!questionCoverageEntries.length" class="muted">暂无课堂阶段覆盖数据。</p>
+          </div>
+          <div class="record">
+            <strong>主要问题与建议</strong>
+            <p><span class="muted">问题：</span><span v-text="formatInline(questionGuidance.summary.main_issue || questionGuidance.summary.issue)"></span></p>
+            <p><span class="muted">证据：</span><span v-text="formatInline(questionGuidance.summary.evidence)"></span></p>
+            <p><span class="muted">建议：</span><span v-text="formatInline(questionGuidance.summary.suggestion)"></span></p>
+          </div>
+        </div>
+        <div class="list">
+          <h3>提问时间线与示例</h3>
+          <div v-if="questionEventsTop.length">
+            <div class="record" v-for="event in questionEventsTop" :key="questionKey(event)">
+              <div class="record-head">
+                <strong v-text="questionLabel(event)"></strong>
+                <span class="badge" v-text="questionKindLabel(event.question_type || event.type || event.category)"></span>
+              </div>
+              <p><span class="muted">时间：</span><span v-text="formatInline(event.start_sec || event.time_sec || event.timestamp_sec)"></span> 秒</p>
+              <p><span class="muted">学生响应：</span><span v-text="formatInline(event.response_signal || event.response || event.student_response)"></span></p>
+              <p><span class="muted">引导建议：</span><span v-text="formatInline(event.guidance || event.suggestion)"></span></p>
+            </div>
+          </div>
+          <div v-else class="empty">教师提问转写暂不可用，当前仅展示已有课堂行为数据。</div>
+        </div>
+      </section>
       <div class="dashboard-grid">
         <div class="chart-panel dashboard-main">
           <h3 class="chart-title">专注度 / 活跃度时间线</h3>
@@ -517,7 +578,10 @@ def build_results_center_html(
             stage_distribution: result.stage_distribution,
             zones: result.zones,
             events: result.events,
-            raw_payload: result.raw_payload
+            raw_payload: result.raw_payload,
+            phase33: result.phase33,
+            teacher_question_events: result.teacher_question_events,
+            question_guidance_summary: result.question_guidance_summary
           }};
         }},
         formatScore(value) {{
@@ -566,6 +630,21 @@ def build_results_center_html(
         }},
         issueKey(issue) {{
           return issue.id || issue.issue_id || `${{this.issueLabel(issue)}}-${{issue.severity || "unknown"}}`;
+        }},
+        questionKindLabel(value) {{
+          return ({{
+            open: "开放提问",
+            closed: "封闭提问",
+            check: "检查理解",
+            guiding: "引导追问",
+            reasoning: "推理追问"
+          }})[value] || value || "未知类型";
+        }},
+        questionLabel(event) {{
+          return event.text || event.question_text || event.prompt || event.label || event.event_id || "未标注提问";
+        }},
+        questionKey(event) {{
+          return event.event_id || event.id || `${{this.questionLabel(event)}}-${{event.start_sec || event.time_sec || "unknown"}}`;
         }},
         statusText(value) {{
           return ({{raw: "待复盘", reviewed: "已复盘", archived: "已归档"}})[value] || value || "未知";
@@ -773,6 +852,57 @@ def build_results_center_html(
         }},
         enhancedIssuesTop() {{
           return (this.enhanced.enhanced_issues || []).slice(0, 3);
+        }},
+        questionGuidance() {{
+          const detail = this.selectedDetail || {{}};
+          const raw = detail.raw_payload || {{}};
+          const phase33 = detail.phase33 || {{}};
+          const summary = detail.question_guidance_summary || phase33.question_guidance_summary || raw.question_guidance_summary || {{}};
+          const events = detail.teacher_question_events || phase33.teacher_question_events || raw.teacher_question_events || [];
+          return {{
+            summary: summary || {{}},
+            events: Array.isArray(events) ? events : []
+          }};
+        }},
+        hasQuestionGuidance() {{
+          const guidance = this.questionGuidance;
+          return Boolean((guidance.events || []).length || Object.keys(guidance.summary || {{}}).length);
+        }},
+        questionGuidanceCount() {{
+          const summary = this.questionGuidance.summary || {{}};
+          return summary.question_count || summary.teacher_question_count || (this.questionGuidance.events || []).length || 0;
+        }},
+        questionGuidanceDemo() {{
+          const detail = this.selectedDetail || {{}};
+          const raw = detail.raw_payload || {{}};
+          const dataset = raw.dataset || {{}};
+          const summary = this.questionGuidance.summary || {{}};
+          return [detail.status, dataset.source, summary.source, summary.status].some((value) => value === "demo" || value === "demo_seed");
+        }},
+        questionDistributionEntries() {{
+          const summary = this.questionGuidance.summary || {{}};
+          const distribution = summary.question_distribution || summary.open_closed_check_distribution || summary.distribution || {{}};
+          return Object.entries(distribution).map(([key, value]) => ({{
+            key,
+            label: this.questionKindLabel(key),
+            value: this.formatInline(value)
+          }}));
+        }},
+        questionCoverageEntries() {{
+          const summary = this.questionGuidance.summary || {{}};
+          const coverage = summary.stage_coverage || summary.coverage || summary.early_middle_late_coverage || {{}};
+          const labels = {{early: "前段", middle: "中段", late: "后段"}};
+          return Object.entries(coverage).map(([key, value]) => ({{
+            key,
+            label: labels[key] || key,
+            value: this.formatInline(value)
+          }}));
+        }},
+        questionEventsTop() {{
+          const summary = this.questionGuidance.summary || {{}};
+          const examples = summary.top_examples || summary.examples || [];
+          const source = (Array.isArray(examples) && examples.length) ? examples : this.questionGuidance.events;
+          return (source || []).slice(0, 5);
         }},
         summary() {{
           return (this.selectedDetail && this.selectedDetail.summary) || {{}};
