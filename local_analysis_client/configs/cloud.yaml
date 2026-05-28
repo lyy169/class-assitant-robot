@@ -1,0 +1,12 @@
+# Cloud-side template configuration.
+
+api:
+  interaction_results_path: "/api/interaction-results"
+  backward_compatible: true
+
+auth:
+  enabled: false
+  header_name: "X-API-Key"
+
+storage:
+  raw_results_dir: "data/raw"

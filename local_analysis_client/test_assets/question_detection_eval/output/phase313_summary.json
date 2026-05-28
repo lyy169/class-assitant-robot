@@ -1,0 +1,17 @@
+{
+  "analysis_id": "phase313_asr_enriched_full_classroom_sav_20200908_17",
+  "transcript_path": "C:\\Users\\lyy\\Desktop\\gradu\\ultralytics-8.3.163\\test_assets\\question_detection_eval\\teacher_transcript_eval.json",
+  "source_analysis_path": "C:\\Users\\lyy\\Desktop\\gradu\\ultralytics-8.3.163\\test_assets\\question_detection_eval\\empty_source_analysis.json",
+  "output_dir": "C:\\Users\\lyy\\Desktop\\gradu\\ultralytics-8.3.163\\test_assets\\question_detection_eval\\output",
+  "transcript_segment_count": 150,
+  "question_event_count": 66,
+  "alignment_count": 66,
+  "response_detected_count": 0,
+  "response_success_rate": 0.0,
+  "speaker_diarization": false,
+  "teacher_identity_confidence": "low_without_diarization",
+  "question_event_explanation": "question_events 是基于 ASR 文本规则和视觉响应对齐生成的教师提问候选事件。",
+  "no_teacher_identity_overclaim": true,
+  "no_cloud_upload": true,
+  "next_phase": "Phase 3.14 uploads the ASR-enhanced payload to cloud after review."
+}
