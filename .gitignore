@@ -40,6 +40,42 @@ dist/
 .DS_Store
 Thumbs.db
 
+# Raspberry Pi client runtime artifacts and private config
+raspberry_pi_client/.env
+raspberry_pi_client/.env.*
+!raspberry_pi_client/.env.example
+raspberry_pi_client/Log/
+raspberry_pi_client/logs/
+raspberry_pi_client/captures/
+raspberry_pi_client/captures_local_delivery/
+raspberry_pi_client/videos_to_upload/
+raspberry_pi_client/QQMusicApi/
+raspberry_pi_client/.capture_session*.json
+raspberry_pi_client/.capture_session*.pid
+raspberry_pi_client/Sound/question.wav
+raspberry_pi_client/Sound/*.raw
+raspberry_pi_client/Sound/*.mp3
+raspberry_pi_client/QQMusicApi/data/
+raspberry_pi_client/snowboy/resources/alexa/
+raspberry_pi_client/**/*.apk
+raspberry_pi_client/**/*.mp4
+raspberry_pi_client/**/*.avi
+raspberry_pi_client/**/*.mov
+raspberry_pi_client/**/*.mkv
+raspberry_pi_client/**/*.jpg
+raspberry_pi_client/**/*.jpeg
+raspberry_pi_client/**/*.png
+raspberry_pi_client/**/*.wav
+raspberry_pi_client/**/*.pmdl
+raspberry_pi_client/**/*.umdl
+raspberry_pi_client/**/*.ppn
+raspberry_pi_client/**/*.pt
+raspberry_pi_client/**/*.pth
+raspberry_pi_client/**/*.onnx
+raspberry_pi_client/**/*.weights
+raspberry_pi_client/**/*.so
+raspberry_pi_client/**/__pycache__/
+
 # Local analysis client runtime/config artifacts
 local_analysis_client/config.yaml
 local_analysis_client/.env
