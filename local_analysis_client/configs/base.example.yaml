@@ -1,0 +1,13 @@
+# Example shared defaults for the future layered configuration layout.
+
+schema:
+  version: "1.0"
+
+logging:
+  level: INFO
+  format: "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+statistics:
+  window_seconds: 20
+  region_rows: 3
+  region_cols: 3

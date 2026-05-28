@@ -1,0 +1,13 @@
+# Raspberry Pi edge template configuration.
+
+device:
+  device_id: "pi-001"
+  classroom_id: "classroom-001"
+
+capture:
+  window_seconds: 20
+  keyframe_strategy: "representative"
+  upload_format: "jpeg"
+
+upload:
+  target_url: "http://local-processor/api/keyframes"
