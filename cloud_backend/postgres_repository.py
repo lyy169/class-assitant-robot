@@ -14,6 +14,23 @@ from .reporting import build_rule_report
 from .storage import FileResultRepository
 
 
+FINAL_COMPETITION_ANALYSIS_ID = "phase314_asr_full_classroom_sav_20200908_17"
+SAV_FULL_CLASSROOM_HISTORY_IDS = {
+    "phase37_full_classroom_sav_20200908_17",
+}
+SMOKE_TEST_ANALYSIS_IDS = {
+    "phase35_local_imported_sav_full_classroom_20200908_17",
+}
+LEGACY_TEST_ANALYSIS_IDS = {
+    "cls_20260417_101_001",
+    "cls_20260430_classroom_101_d4b91cf9c0bf4e68bfcb5e12933d30ee",
+    "cls_20260429_classroom_101_c993e071203b44e1bef1db1586181503",
+}
+LEGACY_TEST_VIDEO_IDS = {
+    "video_20260417_001",
+}
+
+
 class PostgreSQLResultRepository:
     """PostgreSQL-backed repository that keeps raw JSON as the write floor."""
 
@@ -138,9 +155,9 @@ class PostgreSQLResultRepository:
         self,
         classroom_id: Optional[str] = None,
     ) -> Optional[Tuple[Dict[str, Any], Path, str]]:
-        recent = self.recent_results(limit=1, classroom_id=classroom_id)
+        recent = self.recent_results(limit=100, classroom_id=classroom_id)
         if recent:
-            latest = recent[0]
+            latest = next((item for item in recent if self._record_frontstage_visible(item)), recent[0])
             return latest["payload"], latest["source_path"], latest["source_kind"]
         return self.fallback_repository.latest_result(classroom_id=classroom_id)
 
@@ -360,16 +377,50 @@ class PostgreSQLResultRepository:
         status: Optional[str] = None,
         user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
+        normalized_limit = max(1, min(int(limit or 10), 100))
+        query_limit = min(max(normalized_limit * 5, 100), 500)
         if user_id is None:
-            return [self._row_to_workbench_item(record) for record in self.get_recent(limit, classroom_id, status)]
+            records = self.get_recent(query_limit, classroom_id, status)
+            visible_records = [record for record in records if self._record_frontstage_visible(record)]
+            return [self._workbench_recent_item_from_record(record) for record in visible_records[:normalized_limit]]
         rows = self._teacher_result_rows(
             user_id=str(user_id),
             classroom_id=classroom_id,
             status=self._normalize_status(status, allow_empty=True),
-            limit=limit,
+            limit=query_limit,
             offset=0,
         )
-        return [self._row_to_workbench_item(self._row_to_record(row)) for row in rows]
+        visible = self._frontstage_items([self._row_to_teacher_result_item(row) for row in rows])
+        return [self._workbench_recent_item_from_list_item(item) for item in visible[:normalized_limit]]
+
+    def _workbench_recent_item_from_record(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        item = self._row_to_workbench_item(record)
+        summary = record.get("summary") or {}
+        item.update(
+            {
+                "source_kind": record.get("source_kind") or "raw",
+                "source_path": str(record.get("source_path") or ""),
+                "summary": summary,
+            }
+        )
+        return item
+
+    def _workbench_recent_item_from_list_item(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        summary = {
+            "analysis_id": item.get("analysis_id"),
+            "classroom_id": item.get("classroom_id"),
+            "lesson_title": item.get("lesson_title"),
+            "created_at": item.get("created_at"),
+            "generated_at": item.get("generated_at"),
+            "feedback_score": item.get("feedback_score"),
+            "status": item.get("status"),
+        }
+        return {
+            **item,
+            "source_kind": item.get("source_kind") or "raw",
+            "source_path": str(item.get("raw_path") or ""),
+            "summary": summary,
+        }
 
     def get_workbench_classrooms(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         self.ensure_phase2_schema()
@@ -465,7 +516,7 @@ class PostgreSQLResultRepository:
 
     def get_teacher_overview(self, user_id: Optional[str] = None) -> Dict[str, Any]:
         rows = self._teacher_result_rows(user_id=user_id, limit=500, offset=0)
-        items = [self._row_to_teacher_result_item(row) for row in rows]
+        items = self._frontstage_items([self._row_to_teacher_result_item(row) for row in rows])
         classrooms: Dict[str, Dict[str, Any]] = {}
         for item in items:
             classroom_id = item.get("classroom_id") or "unknown"
@@ -524,7 +575,7 @@ class PostgreSQLResultRepository:
             classroom_id=classroom_id,
             status=normalized_status,
             days=normalized_days,
-            limit=normalized_limit,
+            limit=min(max(normalized_limit * 5, 100), 500),
             offset=normalized_offset,
         )
         total = self._teacher_result_count(
@@ -533,6 +584,7 @@ class PostgreSQLResultRepository:
             status=normalized_status,
             days=normalized_days,
         )
+        items = self._frontstage_items([self._row_to_teacher_result_item(row) for row in rows])[:normalized_limit]
         return {
             "success": True,
             "filters": {
@@ -542,8 +594,9 @@ class PostgreSQLResultRepository:
                 "limit": normalized_limit,
                 "offset": normalized_offset,
             },
-            "items": [self._row_to_teacher_result_item(row) for row in rows],
-            "total": total,
+            "items": items,
+            "total": len(items),
+            "raw_total": total,
         }
 
     def get_phase3_teacher_trends(
@@ -563,9 +616,9 @@ class PostgreSQLResultRepository:
             date_from=date_from,
             date_to=date_to,
             data_source=normalized_source,
-            limit=normalized_limit,
+            limit=min(max(normalized_limit * 5, 100), 1000),
         )
-        lessons = [self._row_to_phase3_lesson(row) for row in rows]
+        lessons = self._trend_items([self._row_to_phase3_lesson(row) for row in rows])
         lessons.sort(key=lambda item: str(item.get("created_at") or ""), reverse=False)
         overview = self._phase3_overview(lessons)
         return {
@@ -602,9 +655,10 @@ class PostgreSQLResultRepository:
             date_from=date_from,
             date_to=date_to,
             data_source=normalized_source,
-            limit=normalized_limit,
+            limit=min(max(normalized_limit * 5, 100), 1000),
         )
-        items = [self._row_to_phase3_report_item(row) for row in rows]
+        raw_items = [self._row_to_phase3_report_item(row) for row in rows]
+        items = self._report_items(raw_items)[:normalized_limit]
         return {
             "success": True,
             "filters": {
@@ -616,6 +670,7 @@ class PostgreSQLResultRepository:
             },
             "items": items,
             "total": len(items),
+            "raw_total": len(raw_items),
         }
 
     def get_phase3_teacher_report_detail(
@@ -645,9 +700,9 @@ class PostgreSQLResultRepository:
             date_from=date_from,
             date_to=date_to,
             data_source=normalized_source,
-            limit=normalized_limit,
+            limit=min(max(normalized_limit * 5, 100), 1000),
         )
-        lessons = [self._row_to_phase3_lesson(row) for row in rows]
+        lessons = self._trend_items([self._row_to_phase3_lesson(row) for row in rows])
         return {
             "success": True,
             "filters": {
@@ -668,7 +723,7 @@ class PostgreSQLResultRepository:
 
     def get_admin_overview(self) -> Dict[str, Any]:
         rows = self._admin_result_rows(limit=500, offset=0)
-        items = [self._row_to_admin_result_item(row) for row in rows]
+        items = self._frontstage_items([self._row_to_admin_result_item(row) for row in rows])
         status_distribution = self._status_distribution(items)
         return {
             "success": True,
@@ -693,7 +748,7 @@ class PostgreSQLResultRepository:
         offset: int = 0,
     ) -> Dict[str, Any]:
         rows = self._admin_result_rows(limit=1000, offset=0)
-        items = [self._row_to_admin_result_item(row) for row in rows]
+        items = self._frontstage_items([self._row_to_admin_result_item(row) for row in rows])
         grouped: Dict[str, Dict[str, Any]] = {}
         for item in items:
             classroom_id = item.get("classroom_id") or "unknown"
@@ -768,7 +823,7 @@ class PostgreSQLResultRepository:
         offset: int = 0,
     ) -> Dict[str, Any]:
         rows = self._admin_result_rows(limit=1000, offset=0)
-        items = [self._row_to_admin_result_item(row) for row in rows]
+        items = self._frontstage_items([self._row_to_admin_result_item(row) for row in rows])
         grouped: Dict[str, Dict[str, Any]] = {}
         for item in items:
             teacher_id = item.get("teacher_id") or "demo"
@@ -849,7 +904,7 @@ class PostgreSQLResultRepository:
             teacher_id=teacher_id,
             status=normalized_status,
             days=normalized_days,
-            limit=normalized_limit,
+            limit=min(max(normalized_limit * 5, 100), 500),
             offset=normalized_offset,
         )
         total = self._admin_result_count(
@@ -858,7 +913,7 @@ class PostgreSQLResultRepository:
             status=normalized_status,
             days=normalized_days,
         )
-        items = [self._row_to_admin_result_item(row) for row in rows]
+        items = self._frontstage_items([self._row_to_admin_result_item(row) for row in rows])[:normalized_limit]
         return {
             "success": True,
             "filters": {
@@ -869,9 +924,10 @@ class PostgreSQLResultRepository:
                 "limit": normalized_limit,
                 "offset": normalized_offset,
             },
-            "overview": self._admin_results_overview(items, total),
+            "overview": self._admin_results_overview(items, len(items)),
             "items": items,
-            "total": total,
+            "total": len(items),
+            "raw_total": total,
         }
 
     def get_admin_ingestion(
@@ -1179,6 +1235,7 @@ class PostgreSQLResultRepository:
         duration_seconds = self._number_value(row.get("session_duration_seconds"), time_info.get("duration_seconds"))
         analysis_id = detail.get("analysis_id") or row.get("analysis_id")
         video_status = video.get("status") or "missing"
+        presentation_scope = detail.get("presentation_scope") or {}
         return {
             "result_id": analysis_id,
             "analysis_id": analysis_id,
@@ -1195,6 +1252,16 @@ class PostgreSQLResultRepository:
             "status": detail.get("status") or "raw",
             "has_video": video_status == "playable" or bool(video.get("video_id") or video.get("raw_video_path")),
             "video_status": video_status,
+            "source_dataset": detail.get("source_dataset"),
+            "sample_type": detail.get("sample_type"),
+            "is_pi_capture": detail.get("is_pi_capture"),
+            "is_own_capture": detail.get("is_own_capture"),
+            "data_quality_note": presentation_scope.get("note") or detail.get("data_quality_note") or "",
+            "presentation_scope": presentation_scope,
+            "display_metrics": presentation_scope.get("metrics") or [],
+            "display_badge": presentation_scope.get("display_badge") or "课堂样本",
+            "record_kind": presentation_scope.get("record_kind") or "standard_classroom",
+            "frontend_visible": presentation_scope.get("frontend_visible", True),
             "detail_url": f"/dashboard?result_id={analysis_id}",
             "updated_at": self._as_iso(row.get("updated_at")),
         }
@@ -1246,6 +1313,7 @@ class PostgreSQLResultRepository:
         transcode_status = video.get("transcode_status") or ("present" if standardized_video_path else "unknown")
         transcode_error = video.get("transcode_error") or ""
         video_status = self._ingestion_video_status(payload)
+        display_scope = self._display_scope(payload)
         missing_metadata = []
         if not capture:
             missing_metadata.append("capture")
@@ -1270,6 +1338,12 @@ class PostgreSQLResultRepository:
             "browser_compatible": browser_compatible,
             "transcode_status": transcode_status,
             "transcode_error": transcode_error,
+            "source_dataset": display_scope.get("source_dataset"),
+            "sample_type": display_scope.get("sample_type"),
+            "is_pi_capture": display_scope.get("is_pi_capture"),
+            "is_own_capture": display_scope.get("is_own_capture"),
+            "capture_label": display_scope.get("capture_label"),
+            "data_quality_note": display_scope.get("data_quality_note") or "",
             "metadata_status": metadata_status,
             "metadata_quality": "good" if metadata_status == "complete" else "needs_metadata",
             "missing_metadata": missing_metadata,
@@ -1379,10 +1453,10 @@ class PostgreSQLResultRepository:
         total = overview.get("total_results", 0)
         return [
             {
-                "stage": "Raspberry Pi Capture",
+                "stage": "Capture or External Sample",
                 "status": "inferred",
                 "count": total,
-                "description": "Capture metadata inferred from payload.capture or legacy fallbacks.",
+                "description": "Capture endpoint, uploaded package, or external sample metadata inferred from payload.",
             },
             {
                 "stage": "Local Analysis",
@@ -1442,6 +1516,8 @@ class PostgreSQLResultRepository:
         teacher = payload.get("teacher") or {}
         students = payload.get("students") or {}
         dataset_source = self._dataset_source(payload)
+        presentation_scope = detail.get("presentation_scope") or {}
+        data_quality_note = presentation_scope.get("note") or detail.get("data_quality_note") or self._external_asr_data_quality_note(payload)
         score = self._number_value(summary.get("feedback_score"), row.get("feedback_score"), payload.get("score"), payload.get("overall_score"))
         attention_score = self._number_value(summary.get("attention_score"), row.get("attention_score"), summary.get("avg_attention_ratio") * 100 if summary.get("avg_attention_ratio") else None)
         activity_score = self._activity_score(payload, timeline, students)
@@ -1461,6 +1537,7 @@ class PostgreSQLResultRepository:
             "issue_count": issue_count,
         }
         rule = build_rule_report(metrics)
+        risk_level = "sample" if presentation_scope.get("record_kind") == "competition_final" else rule["risk_level"]
         created_at = self._as_iso(row.get("created_at")) or self._as_iso(row.get("generated_at")) or self._as_iso(row.get("session_generated_at"))
         return {
             "result_id": detail.get("analysis_id") or row.get("analysis_id"),
@@ -1483,7 +1560,16 @@ class PostgreSQLResultRepository:
             "issue_count": issue_count,
             "event_count": len(events),
             "dataset_source": dataset_source,
-            "risk_level": rule["risk_level"],
+            "source_dataset": detail.get("source_dataset"),
+            "sample_type": detail.get("sample_type"),
+            "data_quality_note": data_quality_note,
+            "presentation_scope": presentation_scope,
+            "display_metrics": presentation_scope.get("metrics") or [],
+            "display_badge": presentation_scope.get("display_badge") or "课堂样本",
+            "record_kind": presentation_scope.get("record_kind") or "standard_classroom",
+            "report_eligible": presentation_scope.get("report_eligible", True),
+            "trend_eligible": presentation_scope.get("trend_eligible", True),
+            "risk_level": risk_level,
             "detail_url": f"/dashboard?result_id={detail.get('analysis_id') or row.get('analysis_id')}",
             "report_url": f"/teacher/reports?result_id={detail.get('analysis_id') or row.get('analysis_id')}",
         }
@@ -1502,7 +1588,7 @@ class PostgreSQLResultRepository:
         timeline = detail.get("timeline") or {}
         stage = detail.get("stage_distribution") or {}
         events = detail.get("events") or []
-        rule = build_rule_report(lesson)
+        narrative = self._phase3_report_narrative(lesson, detail)
         enhanced_fields = self._phase32_enhanced_fields(payload)
         question_guidance = self._phase33_question_guidance_fields(payload)
         report = {
@@ -1530,15 +1616,28 @@ class PostgreSQLResultRepository:
             "question_analysis": {
                 "question_count": lesson["question_count"],
                 "response_rate": lesson["response_rate"],
-                "events": [event for event in events if event.get("question_type") or event.get("event_type") == "question"],
+                "events": [
+                    event for event in events
+                    if event.get("question_type") or event.get("event_type") in {"question", "question_candidate"}
+                ],
             },
             "issues": [event for event in events if event.get("event_type") not in {"question", "unknown"}],
-            "highlights": rule["highlights"],
-            "risks": rule["risks"],
-            "recommendations": rule["recommendations"],
-            "risk_level": rule["risk_level"],
+            "highlights": narrative["highlights"],
+            "risks": narrative["risks"],
+            "recommendations": narrative["recommendations"],
+            "risk_level": narrative["risk_level"],
             "ai_summary": {"enabled": False, "status": "not_configured", "content": ""},
             "dataset_source": lesson["dataset_source"],
+            "source_dataset": lesson.get("source_dataset"),
+            "sample_type": lesson.get("sample_type"),
+            "data_quality_note": lesson.get("data_quality_note") or "",
+            "presentation_scope": lesson.get("presentation_scope") or {},
+            "display_metrics": lesson.get("display_metrics") or [],
+            "display_badge": lesson.get("display_badge") or "课堂样本",
+            "record_kind": lesson.get("record_kind") or "standard_classroom",
+            "display_scope": detail.get("display_scope") or {},
+            "display_flags": detail.get("display_flags") or {},
+            "asr_display": detail.get("asr_display") or {},
             "dashboard_url": lesson["detail_url"],
         }
         if enhanced_fields:
@@ -1551,6 +1650,42 @@ class PostgreSQLResultRepository:
             report["teacher_question_events"] = question_guidance.get("teacher_question_events") or []
             report["question_guidance_summary"] = question_guidance.get("question_guidance_summary") or {}
         return report
+
+    def _phase3_report_narrative(self, lesson: Dict[str, Any], detail: Dict[str, Any]) -> Dict[str, Any]:
+        presentation = lesson.get("presentation_scope") or {}
+        profile = presentation.get("metric_profile") or "standard"
+        if profile == "asr_multimodal":
+            asr = detail.get("asr_display") or {}
+            transcript_count = int(self._number_value(asr.get("transcript_segment_count")))
+            question_count = int(self._number_value(asr.get("question_event_count")))
+            response_count = int(self._number_value(asr.get("response_detected_count")))
+            response_rate = self._number_value(asr.get("response_success_rate")) * 100
+            return {
+                "risk_level": "sample",
+                "highlights": [
+                    f"本节课为最终 ASR 增强完整课堂展示样本，已生成 {transcript_count} 个转写片段。",
+                    f"识别出 {question_count} 个教师提问候选事件，完成视觉响应对齐并检测到 {response_count} 次响应。",
+                    f"响应率约 {response_rate:.1f}%，报告以视频证据、ASR 转写和响应对齐为主要依据。",
+                ],
+                "risks": [],
+                "recommendations": [
+                    "比赛展示时优先打开课堂分析页，同屏说明视频证据、ASR 提问候选和响应对齐。",
+                    "该 SAV 外部公开课堂样本不作为常规课堂质量排名依据，不展示专注度 0 或教学阶段灰图。",
+                    "当前未进行说话人分离，提问事件应表述为教师提问候选，不作为精准教师身份识别结论。",
+                ],
+            }
+        if profile == "unavailable":
+            return {
+                "risk_level": "unknown",
+                "highlights": ["该记录属于旧测试数据或缺少有效分析结果，仅允许直达查看原始详情。"],
+                "risks": [],
+                "recommendations": ["不要将该记录纳入正式课堂报告、趋势或质量排名。"],
+            }
+        rule = build_rule_report(lesson)
+        if presentation.get("record_kind") in {"historical_version", "smoke_test"}:
+            rule["risk_level"] = "unknown"
+            rule["risks"] = []
+        return rule
 
     def _phase3_overview(self, lessons: List[Dict[str, Any]]) -> Dict[str, Any]:
         return {
@@ -1600,11 +1735,18 @@ class PostgreSQLResultRepository:
         for item in lessons:
             source = item.get("dataset_source") or "unknown"
             source_counts[source] = source_counts.get(source, 0) + 1
+        external_asr_notes = [
+            item.get("data_quality_note")
+            for item in lessons
+            if item.get("sample_type") == "external_full_classroom_video_with_asr" and item.get("data_quality_note")
+        ]
         return {
             "data_source": data_source,
             "source_counts": source_counts,
             "insufficient_real_data": data_source == "real" and len(lessons) < 2,
             "demo_warning": data_source in {"demo", "all"},
+            "external_asr_sample_present": bool(external_asr_notes),
+            "notes": external_asr_notes[:1],
         }
 
     def _phase3_classroom_rankings(self, lessons: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1644,6 +1786,13 @@ class PostgreSQLResultRepository:
             "score": item.get("score"),
             "risk_level": item.get("risk_level"),
             "dataset_source": item.get("dataset_source"),
+            "source_dataset": item.get("source_dataset"),
+            "sample_type": item.get("sample_type"),
+            "data_quality_note": item.get("data_quality_note"),
+            "presentation_scope": item.get("presentation_scope") or {},
+            "display_metrics": item.get("display_metrics") or [],
+            "display_badge": item.get("display_badge") or "课堂样本",
+            "record_kind": item.get("record_kind") or "standard_classroom",
             "report_url": item.get("report_url"),
             "dashboard_url": item.get("detail_url"),
         }
@@ -1660,6 +1809,137 @@ class PostgreSQLResultRepository:
         if normalized not in {"real", "demo", "all"}:
             return "real"
         return normalized
+
+    def _record_kind(self, payload: Dict[str, Any], analysis_id: Optional[str], scope: Dict[str, Any]) -> Tuple[str, str, bool, bool, bool, str]:
+        timeline = payload.get("timeline") or {}
+        summary = payload.get("summary") or {}
+        lesson_title = self._text_value(payload.get("lesson_title"), payload.get("video_id"))
+        video_id = self._text_value(payload.get("video_id"), (payload.get("video") or {}).get("video_id"))
+        dataset_source = self._dataset_source(payload)
+        source_dataset = str(scope.get("source_dataset") or "")
+        sample_type = str(scope.get("sample_type") or "")
+        normalized_id = str(analysis_id or payload.get("analysis_id") or "")
+        activity_curve = self._number_list(timeline.get("activity_curve"))
+        attention_curve = self._number_list(timeline.get("attention_curve"))
+        event_count = len(payload.get("events") or [])
+        active_windows = len([value for value in activity_curve if value > 0])
+        all_zero_core = not event_count and not active_windows and not any(value > 0 for value in attention_curve) and self._number_value(summary.get("feedback_score")) == 0
+        kind, profile = "standard_classroom", "standard"
+        visible = report_ok = trend_ok = True
+        if dataset_source == "demo":
+            kind = "demo_data"
+        if normalized_id == FINAL_COMPETITION_ANALYSIS_ID:
+            kind, profile = "competition_final", "asr_multimodal"
+            trend_ok = False
+        elif normalized_id in SMOKE_TEST_ANALYSIS_IDS or "cloud_playback_demo" in sample_type.lower():
+            kind = "smoke_test"
+            visible = report_ok = trend_ok = False
+        elif normalized_id in SAV_FULL_CLASSROOM_HISTORY_IDS or (source_dataset.upper() == "SAV" and sample_type in {"external_full_classroom_video", "cloud_playback_demo_from_external_classroom_video"}):
+            kind = "historical_version"
+            visible = report_ok = trend_ok = False
+        if normalized_id in LEGACY_TEST_ANALYSIS_IDS or video_id in LEGACY_TEST_VIDEO_IDS or (all_zero_core and (lesson_title == "video_video" or not source_dataset)):
+            kind, profile = "legacy_test_data", "unavailable"
+            visible = report_ok = trend_ok = False
+        return kind, profile, visible, report_ok, trend_ok, dataset_source
+
+    def _presentation_metrics(self, payload: Dict[str, Any], profile: str, asr: Dict[str, Any], flags: Dict[str, Any]) -> List[Dict[str, Any]]:
+        summary = payload.get("summary") or {}
+        timeline = payload.get("timeline") or {}
+        activity_curve = self._number_list(timeline.get("activity_curve"))
+        active_windows = len([value for value in activity_curve if value > 0])
+        event_count = len(payload.get("events") or [])
+        if profile == "asr_multimodal":
+            return [
+                {"key": "transcript_segments", "label": "转写片段", "value": int(self._number_value(asr.get("transcript_segment_count")))},
+                {"key": "question_candidates", "label": "提问候选", "value": int(self._number_value(asr.get("question_event_count")))},
+                {"key": "response_detected", "label": "检测到响应", "value": int(self._number_value(asr.get("response_detected_count")))},
+                {"key": "response_rate", "label": "响应率", "value": round(self._number_value(asr.get("response_success_rate")) * 100, 1), "suffix": "%"},
+                {"key": "active_windows", "label": "活跃片段", "value": active_windows},
+            ]
+        if profile == "unavailable":
+            return []
+        metrics = [
+            {"key": "feedback_score", "label": "反馈分", "value": round(self._number_value(summary.get("feedback_score")), 2)},
+            {"key": "response_score", "label": "响应", "value": round(self._number_value(summary.get("response_score")), 2)},
+            {"key": "question_count", "label": "提问", "value": int(self._number_value(summary.get("teacher_question_count"), event_count))},
+        ]
+        if not flags.get("hide_attention_metrics"):
+            metrics.insert(1, {"key": "attention_score", "label": "专注", "value": round(self._number_value(summary.get("attention_score")), 2)})
+        return metrics
+
+    def _presentation_scope(
+        self,
+        payload: Dict[str, Any],
+        analysis_id: Optional[str] = None,
+        display_scope: Optional[Dict[str, Any]] = None,
+        asr_display: Optional[Dict[str, Any]] = None,
+        display_flags: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        scope = display_scope or self._display_scope(payload)
+        asr = asr_display or self._asr_display(payload)
+        flags = display_flags or self._display_flags(payload, display_scope=scope, asr_display=asr)
+        kind, profile, visible, report_ok, trend_ok, dataset_source = self._record_kind(payload, analysis_id, scope)
+        badge_map = {
+            "competition_final": "最终展示样本",
+            "historical_version": "历史阶段样本",
+            "smoke_test": "播放链路 smoke test",
+            "legacy_test_data": "旧测试数据",
+            "demo_data": "演示数据",
+            "standard_classroom": "课堂样本",
+        }
+        note_map = {
+            "competition_final": scope.get("data_quality_note") or "外部 SAV ASR 增强样本，不参与常规课堂质量排名。",
+            "historical_version": "同一 SAV 完整课堂的历史阶段版本，默认不作为前端展示样本。",
+            "smoke_test": "播放链路验证记录，不作为完整课堂报告或趋势样本。",
+            "legacy_test_data": "早期测试/旧导入数据，缺少有效分析结果。",
+            "demo_data": "演示数据，仅用于功能展示，不代表真实课堂结论。",
+        }
+        return {
+            "record_kind": kind,
+            "display_badge": badge_map.get(kind, "课堂样本"),
+            "frontend_visible": visible,
+            "report_eligible": report_ok,
+            "trend_eligible": trend_ok,
+            "metric_profile": profile,
+            "is_demo_data": dataset_source == "demo",
+            "is_historical": kind in {"historical_version", "smoke_test", "legacy_test_data"},
+            "note": note_map.get(kind, scope.get("data_quality_note") or ""),
+            "metrics": self._presentation_metrics(payload, profile, asr, flags),
+        }
+
+    def _frontstage_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return self._sort_presentation_items([
+            item for item in items if (item.get("presentation_scope") or {}).get("frontend_visible", True)
+        ])
+
+    def _report_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return self._sort_presentation_items([
+            item for item in items if (item.get("presentation_scope") or {}).get("report_eligible", True)
+        ])
+
+    def _trend_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [item for item in items if (item.get("presentation_scope") or {}).get("trend_eligible", True)]
+
+    def _sort_presentation_items(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        priority = {
+            "competition_final": 0,
+            "standard_classroom": 1,
+            "demo_data": 2,
+            "historical_version": 3,
+            "smoke_test": 4,
+            "legacy_test_data": 5,
+        }
+        newest_first = sorted(items, key=lambda item: str(item.get("created_at") or item.get("generated_at") or ""), reverse=True)
+        return sorted(
+            newest_first,
+            key=lambda item: priority.get((item.get("presentation_scope") or {}).get("record_kind") or item.get("record_kind"), 9),
+        )
+
+    def _record_frontstage_visible(self, record: Dict[str, Any]) -> bool:
+        payload = record.get("payload") or {}
+        summary = record.get("summary") or {}
+        analysis_id = summary.get("analysis_id") or payload.get("analysis_id")
+        return bool(self._presentation_scope(payload, analysis_id=analysis_id).get("frontend_visible", True))
 
     def _activity_score(self, payload: Dict[str, Any], timeline: Dict[str, Any], students: Dict[str, Any]) -> float:
         activity_curve = timeline.get("activity_curve") or []
@@ -1741,7 +2021,10 @@ class PostgreSQLResultRepository:
         }
 
     def _admin_results_overview(self, items: List[Dict[str, Any]], total: int) -> Dict[str, Any]:
-        low_attention = [item for item in items if float(item.get("attention_score") or 0) < 75]
+        low_attention = [
+            item for item in items
+            if self._item_metric_visible(item, "attention_score") and float(item.get("attention_score") or 0) < 75
+        ]
         high_score = [item for item in items if float(item.get("feedback_score") or 0) >= 85]
         return {
             "result_count": total,
@@ -1777,7 +2060,10 @@ class PostgreSQLResultRepository:
                 "description": f"{metrics['raw_count']} raw result(s) are waiting for teacher review.",
                 "target_url": "/teacher/results?status=raw",
             })
-        low_attention = next((item for item in latest_results if float(item.get("attention_score") or 0) < 75), None)
+        low_attention = next((
+            item for item in latest_results
+            if self._item_metric_visible(item, "attention_score") and float(item.get("attention_score") or 0) < 75
+        ), None)
         if low_attention:
             todos.append({
                 "type": "attention",
@@ -1803,10 +2089,24 @@ class PostgreSQLResultRepository:
         return todos
 
     def _average_metric(self, items: List[Dict[str, Any]], key: str) -> Optional[float]:
-        values = [float(item.get(key) or 0) for item in items if item.get(key) is not None]
+        values: List[float] = []
+        for item in items:
+            display_keys = {metric.get("key") for metric in item.get("display_metrics") or [] if isinstance(metric, dict)}
+            metric_key = "feedback_score" if key == "score" else key
+            if display_keys and metric_key in {"feedback_score", "attention_score", "response_score"} and metric_key not in display_keys:
+                continue
+            if item.get(key) is None:
+                continue
+            values.append(float(item.get(key) or 0))
         if not values:
             return None
         return round(sum(values) / len(values), 2)
+
+    def _item_metric_visible(self, item: Dict[str, Any], key: str) -> bool:
+        display_metrics = item.get("display_metrics") or []
+        display_keys = {metric.get("key") for metric in display_metrics if isinstance(metric, dict)}
+        metric_key = "feedback_score" if key == "score" else key
+        return not display_keys or metric_key in display_keys
 
     def _status_distribution(self, items: List[Dict[str, Any]]) -> Dict[str, int]:
         counts = {"raw": 0, "reviewed": 0, "archived": 0}
@@ -1931,6 +2231,17 @@ class PostgreSQLResultRepository:
         zones = self._display_zones(payload)
         events = self._display_events(payload)
         video = self._display_video(payload, item)
+        display_scope = self._display_scope(payload)
+        asr_display = self._asr_display(payload)
+        data_quality_note = self._external_asr_data_quality_note(payload)
+        display_flags = self._display_flags(payload, display_scope=display_scope, asr_display=asr_display)
+        presentation_scope = self._presentation_scope(
+            payload,
+            analysis_id=item.get("analysis_id"),
+            display_scope=display_scope,
+            asr_display=asr_display,
+            display_flags=display_flags,
+        )
         item.update(
             {
                 "teacher_name": payload.get("teacher_name") or "",
@@ -1943,6 +2254,17 @@ class PostgreSQLResultRepository:
                 "raw_path": str(record["source_path"]),
                 "raw_payload": payload,
                 "result": payload,
+                "display_scope": display_scope,
+                "asr_display": asr_display,
+                "display_flags": display_flags,
+                "presentation_scope": presentation_scope,
+                "source_dataset": display_scope.get("source_dataset"),
+                "sample_type": display_scope.get("sample_type"),
+                "is_pi_capture": display_scope.get("is_pi_capture"),
+                "is_own_capture": display_scope.get("is_own_capture"),
+                "is_demo_playback_sample": display_scope.get("is_demo_playback_sample"),
+                "is_final_dashboard_sample": display_scope.get("is_final_dashboard_sample"),
+                "data_quality_note": data_quality_note,
             }
         )
         enhanced_fields = self._phase32_enhanced_fields(payload)
@@ -1977,16 +2299,273 @@ class PostgreSQLResultRepository:
         ]
         return {key: payload.get(key) for key in keys if payload.get(key) not in (None, "", [], {})}
 
+    def _asr_display(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        audio = payload.get("audio") or {}
+        asr_quality = payload.get("asr_quality") or {}
+        evidence_summary = payload.get("evidence_summary") or {}
+        summary = payload.get("summary") or {}
+        transcript = payload.get("transcript") or []
+        teacher = payload.get("teacher") or {}
+        question_events = teacher.get("question_events") or payload.get("teacher_question_events") or []
+        alignment = payload.get("interaction_alignment") or []
+
+        transcript_segments = [segment for segment in transcript if isinstance(segment, dict)]
+        question_items = [event for event in question_events if isinstance(event, dict)]
+        alignment_items = [item for item in alignment if isinstance(item, dict)]
+        response_by_event_id = {
+            str(item.get("question_event_id") or item.get("event_id") or ""): item
+            for item in alignment_items
+        }
+        response_detected_count = sum(1 for item in alignment_items if item.get("response_detected") is True)
+        question_event_count = len(question_items)
+        response_success_rate = self._number_value(
+            summary.get("response_success_rate"),
+            response_detected_count / question_event_count if question_event_count else None,
+        )
+        transcript_segment_count = int(self._number_value(
+            audio.get("transcript_segment_count"),
+            evidence_summary.get("transcript_segment_count"),
+            len(transcript_segments),
+        ))
+        speaker_diarization = self._bool_or_none(asr_quality.get("speaker_diarization"))
+        if speaker_diarization is None:
+            speaker_diarization = False
+
+        snippets = []
+        for segment in transcript_segments:
+            text = str(segment.get("text") or "").strip()
+            if not text:
+                continue
+            snippets.append(
+                {
+                    "start_sec": self._number_value(segment.get("start_sec")),
+                    "end_sec": self._number_value(segment.get("end_sec")),
+                    "text": text,
+                }
+            )
+            if len(snippets) >= 8:
+                break
+
+        display_questions = []
+        for event in question_items[:5]:
+            event_id = str(event.get("event_id") or event.get("id") or "")
+            aligned = response_by_event_id.get(event_id) or {}
+            display_questions.append(
+                {
+                    "event_id": event_id,
+                    "start_sec": self._number_value(event.get("start_sec")),
+                    "end_sec": self._number_value(event.get("end_sec")),
+                    "text": str(event.get("text") or event.get("question_text") or "").strip(),
+                    "confidence": event.get("confidence"),
+                    "response_detected": bool(aligned.get("response_detected")) if aligned else False,
+                }
+            )
+
+        transcript_present = bool(
+            payload.get("has_asr_transcript")
+            or audio.get("transcript_present")
+            or evidence_summary.get("transcript_present")
+            or transcript_segments
+        )
+        note = "提问事件基于本地 ASR 转写、规则检测与视觉响应对齐生成；当前未进行说话人分离，因此作为教师提问候选事件展示，不做精准教师身份判断。"
+        if not transcript_present:
+            note = "当前样本未提供课堂转写，语音相关指标仅作结构展示。"
+
+        return {
+            "transcript_present": transcript_present,
+            "transcript_segment_count": transcript_segment_count,
+            "asr_engine": audio.get("asr_engine") or "",
+            "question_event_count": question_event_count,
+            "alignment_count": len(alignment_items),
+            "response_detected_count": response_detected_count,
+            "response_success_rate": response_success_rate,
+            "speaker_diarization": speaker_diarization,
+            "teacher_identity_confidence": asr_quality.get("teacher_identity_confidence") or "low_without_diarization",
+            "snippets": snippets,
+            "question_events": display_questions,
+            "note": note,
+        }
+
+    def _asr_summary_override(self, payload: Dict[str, Any], asr_display: Optional[Dict[str, Any]] = None) -> str:
+        display = asr_display or self._asr_display(payload)
+        if not display.get("transcript_present"):
+            return ""
+        question_count = int(self._number_value(display.get("question_event_count")))
+        if question_count <= 0:
+            return ""
+        transcript_count = int(self._number_value(display.get("transcript_segment_count")))
+        alignment_count = int(self._number_value(display.get("alignment_count")))
+        response_count = int(self._number_value(display.get("response_detected_count")))
+        return (
+            f"本节课已完成本地 ASR 转写，生成 {transcript_count} 个转写片段，"
+            f"识别出 {question_count} 个教师提问候选事件，并完成 {alignment_count} 条视觉响应对齐，"
+            f"其中 {response_count} 条检测到学生响应。由于当前未进行说话人分离，提问事件作为候选结果展示。"
+        )
+
+    def _external_asr_data_quality_note(self, payload: Dict[str, Any]) -> str:
+        display = self._asr_display(payload)
+        source_dataset = self._text_value(
+            payload.get("source_dataset"),
+            (payload.get("capture") or {}).get("source_dataset"),
+            (payload.get("source") or {}).get("source_dataset"),
+        )
+        sample_type = self._text_value(
+            payload.get("sample_type"),
+            (payload.get("capture") or {}).get("sample_type"),
+            (payload.get("video") or {}).get("sample_type"),
+        )
+        if sample_type == "external_full_classroom_video_with_asr" or (
+            source_dataset.upper() == "SAV" and display.get("transcript_present")
+        ):
+            return "该样本为外部 SAV ASR 增强演示样本，视觉专注度/阶段分布低置信度，不作为常规课堂质量排名依据。"
+        return ""
+
+    def _display_flags(
+        self,
+        payload: Dict[str, Any],
+        display_scope: Optional[Dict[str, Any]] = None,
+        asr_display: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, bool]:
+        scope = display_scope or self._display_scope(payload)
+        display = asr_display or self._asr_display(payload)
+        timeline = payload.get("timeline") or {}
+        students = payload.get("students") or {}
+        zones = payload.get("zones") or students.get("zones") or {}
+        stage_distribution = payload.get("stage_distribution") or (payload.get("teacher") or {}).get("stage_distribution") or {}
+
+        source_dataset = str(scope.get("source_dataset") or "").upper()
+        sample_type = str(scope.get("sample_type") or "")
+        attention_curve = self._number_list(timeline.get("attention_curve"))
+        heat_curve = self._number_list(timeline.get("heat_curve"))
+        stage_values = [self._number_value(value) for value in stage_distribution.values()] if isinstance(stage_distribution, dict) else []
+        zone_attention_values = [
+            self._number_value((zones.get(zone_name) or {}).get("avg_attention_ratio"))
+            for zone_name in ["front", "middle", "back"]
+            if isinstance(zones, dict)
+        ]
+        estimated_student_count = self._number_value(students.get("estimated_student_count"), payload.get("estimated_student_count"))
+
+        attention_unavailable = bool(attention_curve) and all(value == 0 for value in attention_curve)
+        heat_unavailable = bool(heat_curve) and all(value == 0 for value in heat_curve)
+        stage_unavailable = bool(stage_values) and all(value == 0 for value in stage_values)
+        zone_attention_unavailable = bool(zone_attention_values) and all(value == 0 for value in zone_attention_values)
+        student_count_unavailable = estimated_student_count == 0
+        asr_sav_sample = bool(
+            display.get("transcript_present")
+            and self._number_value(display.get("question_event_count")) > 0
+            and (sample_type == "external_full_classroom_video_with_asr" or source_dataset == "SAV")
+        )
+
+        hide_attention = asr_sav_sample and attention_unavailable
+        return {
+            "asr_trusted_metrics_only": asr_sav_sample,
+            "hide_attention_metrics": hide_attention,
+            "hide_avg_attention": hide_attention,
+            "hide_attention_curve": hide_attention,
+            "hide_region_attention": asr_sav_sample and zone_attention_unavailable,
+            "hide_student_count": asr_sav_sample and student_count_unavailable,
+            "hide_stage_distribution": asr_sav_sample and stage_unavailable,
+            "hide_phase32_score_breakdown": asr_sav_sample,
+            "hide_feedback_score_as_primary": asr_sav_sample,
+            "visual_attention_low_confidence": asr_sav_sample and attention_unavailable and heat_unavailable,
+            "visual_stage_low_confidence": asr_sav_sample and stage_unavailable,
+        }
+
+    def _display_scope(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        source = payload.get("source") or {}
+        capture = payload.get("capture") or {}
+        video = payload.get("video") or {}
+        evidence_summary = payload.get("evidence_summary") or {}
+        question_guidance = payload.get("question_guidance_summary") or {}
+        phase37 = payload.get("phase37_final_dashboard_sample") or {}
+
+        source_dataset = self._text_value(payload.get("source_dataset"), capture.get("source_dataset"), source.get("source_dataset"))
+        sample_type = self._text_value(payload.get("sample_type"), capture.get("sample_type"), video.get("sample_type"))
+        is_pi_capture = self._bool_or_none(payload.get("is_pi_capture"), capture.get("is_pi_capture"), source.get("is_pi_capture"))
+        is_own_capture = self._bool_or_none(payload.get("is_own_capture"), capture.get("is_own_capture"), source.get("is_own_capture"))
+        is_demo_playback_sample = self._bool_or_none(
+            payload.get("is_demo_playback_sample"),
+            capture.get("is_demo_playback_sample"),
+            video.get("is_demo_playback_sample"),
+        )
+        is_final_dashboard_sample = self._bool_or_none(
+            payload.get("is_final_dashboard_sample"),
+            capture.get("is_final_dashboard_sample"),
+            video.get("is_final_dashboard_sample"),
+            phase37.get("final_dashboard_sample"),
+        )
+        if is_demo_playback_sample is None:
+            is_demo_playback_sample = "cloud_playback_demo" in sample_type.lower()
+        if is_final_dashboard_sample is None:
+            is_final_dashboard_sample = False
+
+        audio_present = self._bool_or_none(payload.get("audio_present"), evidence_summary.get("audio_present"))
+        transcript = payload.get("transcript") or []
+        transcript_present = self._bool_or_none(
+            payload.get("transcript_present"),
+            evidence_summary.get("transcript_present"),
+            payload.get("has_asr_transcript"),
+            True if transcript else None,
+        )
+        question_events = payload.get("teacher_question_events") or (payload.get("teacher") or {}).get("question_events") or []
+        question_source = str(question_guidance.get("source") or "").lower()
+        unsupported_metric_note = ""
+        if source_dataset.upper() == "SAV" and transcript_present is True and question_events:
+            unsupported_metric_note = "该外部视频样本未接入树莓派语音触发与说话人分离；课堂转写由本地离线 ASR 生成，提问事件作为候选结果展示。"
+        elif source_dataset.upper() == "SAV" and (
+            audio_present is False
+            or transcript_present is False
+            or not question_events
+            or question_source in {"teacher_transcript_empty", "unavailable"}
+        ):
+            unsupported_metric_note = "该外部视频样本未提供有效课堂转写或提问证据，语音相关教学阶段和教师提问指标仅作结构展示，不作为主要评价依据。"
+
+        final_sample_note = ""
+        if is_final_dashboard_sample and source_dataset.upper() == "SAV" and is_pi_capture is False and is_own_capture is False:
+            final_sample_note = "当前课堂样本来自 SAV 外部公开课堂视频，已由本地分析端处理并自动上传至云端；该样本用于完整课堂展示，不属于树莓派自采数据。"
+
+        demo_playback_note = ""
+        if is_demo_playback_sample or "cloud_playback_demo" in sample_type.lower():
+            demo_playback_note = "该记录为播放链路 smoke test，不作为最终完整课堂分析展示样本。"
+
+        return {
+            "source_dataset": source_dataset,
+            "source_label": "SAV 外部公开课堂视频" if source_dataset.upper() == "SAV" else source_dataset,
+            "analysis_scope": "完整课堂分析" if is_final_dashboard_sample else ("播放链路 smoke test" if is_demo_playback_sample else "课堂分析"),
+            "capture_label": "非树莓派采集 / 非自采" if is_pi_capture is False and is_own_capture is False else "采集来源按原始数据展示",
+            "sample_type": sample_type,
+            "is_final_dashboard_sample": bool(is_final_dashboard_sample),
+            "is_demo_playback_sample": bool(is_demo_playback_sample),
+            "is_pi_capture": is_pi_capture,
+            "is_own_capture": is_own_capture,
+            "final_sample_note": final_sample_note,
+            "demo_playback_note": demo_playback_note,
+            "unsupported_metric_note": unsupported_metric_note,
+            "data_quality_note": self._external_asr_data_quality_note(payload),
+            "no_sav50_mixed": bool(phase37.get("not_sav50_composite") or is_final_dashboard_sample),
+        }
+
     def _display_summary(self, payload: Dict[str, Any], item: Dict[str, Any]) -> Dict[str, Any]:
         summary = payload.get("summary") or {}
+        asr_display = self._asr_display(payload)
+        summary_text = self._asr_summary_override(payload, asr_display) or summary.get("summary_text") or payload.get("summary_text") or ""
+        teacher_question_count = int(self._number_value(
+            summary.get("teacher_question_count"),
+            asr_display.get("question_event_count"),
+            0,
+        ))
+        response_success_rate = self._number_value(
+            summary.get("response_success_rate"),
+            asr_display.get("response_success_rate"),
+        )
         return {
             "feedback_score": self._number_value(summary.get("feedback_score"), item.get("score"), payload.get("overall_score")),
             "attention_score": self._number_value(summary.get("attention_score")),
             "response_score": self._number_value(summary.get("response_score")),
-            "teacher_question_count": int(self._number_value(summary.get("teacher_question_count"), 0)),
+            "teacher_question_count": teacher_question_count,
             "avg_attention_ratio": self._number_value(summary.get("avg_attention_ratio")),
-            "response_success_rate": self._number_value(summary.get("response_success_rate")),
-            "summary_text": summary.get("summary_text") or payload.get("summary_text") or "",
+            "response_success_rate": response_success_rate,
+            "summary_text": summary_text,
         }
 
     def _display_timeline(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -2022,10 +2601,13 @@ class PostgreSQLResultRepository:
 
     def _display_events(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
         teacher = payload.get("teacher") or {}
-        raw_events = (
+        teacher_question_events = teacher.get("question_events") or payload.get("teacher_question_events") or []
+        asr_display = self._asr_display(payload)
+        prefer_asr_questions = bool(asr_display.get("transcript_present") and teacher_question_events)
+        raw_events = teacher_question_events if prefer_asr_questions else (
             payload.get("events")
             or payload.get("issues")
-            or teacher.get("question_events")
+            or teacher_question_events
             or payload.get("question_events")
             or []
         )
@@ -2033,13 +2615,16 @@ class PostgreSQLResultRepository:
         for index, event in enumerate(raw_events):
             if not isinstance(event, dict):
                 continue
-            event_type = (
-                event.get("event_type")
-                or event.get("type")
-                or event.get("category")
-                or event.get("question_type")
-                or "unknown"
-            )
+            if prefer_asr_questions:
+                event_type = "question_candidate"
+            else:
+                event_type = (
+                    event.get("event_type")
+                    or event.get("type")
+                    or event.get("category")
+                    or event.get("question_type")
+                    or "unknown"
+                )
             events.append(
                 {
                     "event_id": event.get("event_id") or f"event_{index + 1:03d}",
@@ -2121,6 +2706,27 @@ class PostgreSQLResultRepository:
         if normalized not in {"raw", "reviewed", "archived"}:
             raise ValueError("status must be raw, reviewed, or archived")
         return normalized
+
+    def _text_value(self, *values: Any) -> str:
+        for value in values:
+            if value not in (None, ""):
+                return str(value)
+        return ""
+
+    def _bool_or_none(self, *values: Any) -> Optional[bool]:
+        for value in values:
+            if value in (None, ""):
+                continue
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, (int, float)):
+                return bool(value)
+            text = str(value).strip().lower()
+            if text in {"1", "true", "yes", "y", "on"}:
+                return True
+            if text in {"0", "false", "no", "n", "off"}:
+                return False
+        return None
 
     def _number_value(self, *values: Any) -> float:
         for value in values:

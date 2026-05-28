@@ -24,7 +24,6 @@ def _teacher_nav(active: str, current_user: Optional[dict] = None) -> str:
         "home": "active" if active == "home" else "",
         "results": "active" if active == "results" else "",
         "detail": "active" if active == "detail" else "",
-        "trends": "active" if active == "trends" else "",
         "reports": "active" if active == "reports" else "",
     }
     return f"""
@@ -37,7 +36,6 @@ def _teacher_nav(active: str, current_user: Optional[dict] = None) -> str:
         <a class="{active_class['home']}" href="/teacher">教学首页</a>
         <a class="{active_class['results']}" href="/teacher/results">课堂记录</a>
         <a class="{active_class['detail']}" href="/dashboard">课堂分析</a>
-        <a class="{active_class['trends']}" href="/teacher/trends">趋势洞察</a>
         <a class="{active_class['reports']}" href="/teacher/reports">报告中心</a>
       </div>
       {_identity_bar(current_user)}
@@ -71,16 +69,10 @@ def build_teacher_home_html(current_user: Optional[dict] = None) -> str:
       <div class="page-header dashboard-main">
         <p class="kicker">教学反馈工作台</p>
         <h1 id="welcome-title">教学反馈工作台</h1>
-        <p class="muted">把课堂证据、参与趋势和改进建议聚合到一个工作台，先看需要复盘的课堂，再进入报告和趋势洞察。</p>
-        <div class="data-strip" aria-label="最近课堂参与节奏">
-          <span class="strip-cell high"></span><span class="strip-cell high question"></span><span class="strip-cell medium"></span><span class="strip-cell high"></span>
-          <span class="strip-cell low"></span><span class="strip-cell medium question"></span><span class="strip-cell high"></span><span class="strip-cell high"></span>
-          <span class="strip-cell medium"></span><span class="strip-cell high question"></span><span class="strip-cell high"></span><span class="strip-cell medium"></span>
-        </div>
+        <p class="muted">把课堂证据、分析报告和改进建议聚合到一个工作台，先看需要复盘的课堂，再进入课堂分析和报告中心。</p>
         <p class="muted">最近数据更新：<span id="last-update">加载中...</span></p>
         <div class="action-row">
           <a class="button" href="/teacher/reports">查看课堂报告</a>
-          <a class="button secondary" href="/teacher/trends">查看趋势洞察</a>
           <a class="button secondary" href="/dashboard">进入课堂分析</a>
         </div>
       </div>
@@ -99,13 +91,8 @@ def build_teacher_home_html(current_user: Optional[dict] = None) -> str:
       </div>
       <div class="action-card">
         <h2>教学节奏提示</h2>
-        <p class="muted">热力条用于快速判断最近课堂参与状态：绿色代表参与较好，琥珀代表需要观察，红色代表建议重点复盘。</p>
-        <div class="heat-strip">
-          <span class="strip-cell high"></span><span class="strip-cell medium"></span><span class="strip-cell high"></span><span class="strip-cell low"></span>
-          <span class="strip-cell medium question"></span><span class="strip-cell high"></span><span class="strip-cell high"></span><span class="strip-cell medium"></span>
-          <span class="strip-cell high"></span><span class="strip-cell low"></span><span class="strip-cell medium"></span><span class="strip-cell high question"></span>
-        </div>
-        <a class="button secondary" href="/teacher/trends">查看长期趋势</a>
+        <p class="muted">当前演示以课堂分析页和报告中心为主，优先查看视频证据、ASR 提问候选和响应对齐。</p>
+        <a class="button secondary" href="/teacher/reports">查看课堂报告</a>
       </div>
     </section>
     <section class="card">
@@ -127,7 +114,11 @@ def build_teacher_home_html(current_user: Optional[dict] = None) -> str:
       const text = (value, fallback = "暂无") => value === null || value === undefined || value === "" ? fallback : value;
       const statusLabel = (status) => ({raw:"待复盘", reviewed:"已复盘", archived:"已归档"}[status] || status || "待复盘");
       const statusBadge = (status) => `<span class="badge ${status || "raw"}">${statusLabel(status)}</span>`;
-      async function loadTeacherHome() {
+      const sampleBadge = (item) => item && item.display_badge ? `<span class="badge sample">${text(item.display_badge)}</span>` : "";
+      const metricLine = (item) => {
+        const metrics = (item && item.display_metrics) || [];
+        return metrics.length ? metrics.map((m) => `${text(m.label)} ${text(m.value)}${m.suffix || ""}`).join(" · ") : text((item && item.data_quality_note), "暂无可信指标");
+      };      async function loadTeacherHome() {
         try {
           const response = await fetch("/api/teacher/overview");
           if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -137,12 +128,12 @@ def build_teacher_home_html(current_user: Optional[dict] = None) -> str:
           const latest = payload.latest_results || [];
           document.getElementById("welcome-title").textContent = `欢迎回来，${teacher.display_name || teacher.username || "教师"}`;
           document.getElementById("last-update").textContent = latest[0]?.created_at || latest[0]?.generated_at || "暂无课堂数据";
-          document.getElementById("metric-grid").innerHTML = Object.entries(metricLabels).map(([key, label]) => `<div class="metric"><span>${label}</span><strong>${text(metrics[key], 0)}</strong></div>`).join("");
+          document.getElementById("metric-grid").innerHTML = Object.entries(metricLabels).filter(([key]) => metrics[key] !== null && metrics[key] !== undefined).map(([key, label]) => `<div class="metric"><span>${label}</span><strong>${text(metrics[key], 0)}</strong></div>`).join("");
           document.getElementById("latest-results").innerHTML = latest.length ? latest.map((item) => `
             <div class="record">
-              <div class="record-head"><strong>${text(item.lesson_title, "未命名课堂")}</strong>${statusBadge(item.status)}</div>
+              <div class="record-head"><strong>${text(item.lesson_title, "未命名课堂")}</strong>${sampleBadge(item)}${statusBadge(item.status)}</div>
               <p class="muted">${text(item.classroom_name)} · ${text(item.created_at || item.generated_at)}</p>
-              <p>反馈 ${text(item.feedback_score, 0)} · 专注 ${text(item.attention_score, 0)} · 响应 ${text(item.response_score, 0)}</p>
+              <p>${metricLine(item)}</p>
               <a class="button secondary" href="${item.detail_url}">进入课堂分析</a>
             </div>`).join("") : `<div class="empty">暂无课堂分析，请先完成本地分析上传。</div>`;
           const todos = payload.todo_items || [];
@@ -194,7 +185,11 @@ def build_teacher_results_html(current_user: Optional[dict] = None) -> str:
       const text = (value, fallback = "暂无") => value === null || value === undefined || value === "" ? fallback : value;
       const statusLabel = (status) => ({raw:"待复盘", reviewed:"已复盘", archived:"已归档"}[status] || status || "待复盘");
       const statusBadge = (status) => `<span class="badge ${status || "raw"}">${statusLabel(status)}</span>`;
-      const currentParams = () => new URLSearchParams(window.location.search);
+      const sampleBadge = (item) => item && item.display_badge ? `<span class="badge sample">${text(item.display_badge)}</span>` : "";
+      const metricCards = (item) => {
+        const metrics = (item && item.display_metrics) || [];
+        return metrics.length ? metrics.map((m) => `<div class="mini-stat"><span>${text(m.label)}</span><strong>${text(m.value)}${m.suffix || ""}</strong></div>`).join("") : `<div class="mini-stat"><span>指标</span><strong>暂无</strong></div>`;
+      };      const currentParams = () => new URLSearchParams(window.location.search);
       function applyParamsToForm() { const params = currentParams(); ["classroom_id", "status", "days", "limit"].forEach((key) => { const el = document.getElementById(key); if (el && params.has(key)) el.value = params.get(key); }); }
       async function loadClassrooms() {
         const response = await fetch("/api/teacher/classrooms");
@@ -220,12 +215,10 @@ def build_teacher_results_html(current_user: Optional[dict] = None) -> str:
         document.getElementById("total-count").textContent = `（共 ${payload.total || 0} 条）`;
         document.getElementById("records").innerHTML = items.length ? `<div class="record-grid">${items.map((item) => `
           <article class="result-card">
-            <div class="record-head"><strong>${text(item.lesson_title, "未命名课堂")}</strong>${statusBadge(item.status)}</div>
+            <div class="record-head"><strong>${text(item.lesson_title, "未命名课堂")}</strong>${sampleBadge(item)}${statusBadge(item.status)}</div>
             <p class="muted">${text(item.classroom_name)} · ${text(item.classroom_id)}<br>${text(item.generated_at || item.recorded_at)}</p>
             <div class="score-row">
-              <div class="mini-stat"><span>反馈</span><strong>${text(item.feedback_score, 0)}</strong></div>
-              <div class="mini-stat"><span>专注</span><strong>${text(item.attention_score, 0)}</strong></div>
-              <div class="mini-stat"><span>响应</span><strong>${text(item.response_score, 0)}</strong></div>
+              ${metricCards(item)}
             </div>
             <p class="muted">视频证据：${item.has_video ? "可用" : "待接入"} · ${text(item.video_status)}</p>
             <div class="action-row"><a class="button secondary" href="${item.detail_url}">课堂分析</a><a class="button secondary" href="/teacher/reports?result_id=${item.result_id}">查看报告</a></div>
@@ -254,6 +247,7 @@ def build_teacher_trends_html(current_user: Optional[dict] = None) -> str:
         <div><label>数量</label><input name="limit" id="limit" type="number" min="1" max="100" value="20" /></div>
         <button class="button" type="submit">筛选</button>
       </form>
+      <div class="action-row" data-marker="phase319-trends-retired-entry"><a class="button secondary" href="/teacher/reports">打开报告中心</a></div>
       <div id="source-warning"></div>
     </section>
     <p id="page-error" class="error"></p>
@@ -279,9 +273,10 @@ def build_teacher_trends_html(current_user: Optional[dict] = None) -> str:
         const p=params(); if(!p.has("data_source")) p.set("data_source","real"); if(!p.has("limit")) p.set("limit","20");
         const r=await fetch(`/api/teacher/trends?${p.toString()}`); if(!r.ok) throw new Error(`HTTP ${r.status}`);
         const payload=await r.json(); const o=payload.overview||{}; const s=payload.series||{}; const q=payload.data_quality||{};
-        document.getElementById("source-warning").innerHTML = q.demo_warning ? `<div class="warning">当前包含演示数据，仅用于比赛展示或功能演示，不代表真实教学趋势。</div>` : (q.insufficient_real_data ? `<div class="empty">真实数据不足，建议上传更多课堂结果后再观察趋势；也可以切换到演示数据查看展示效果。</div>` : "");
+        const qualityNote = ((q.notes || [])[0]) || "";
+        document.getElementById("source-warning").innerHTML = qualityNote ? `<div class="record">${qualityNote}</div>` : (q.demo_warning ? `<div class="warning">当前包含演示数据，仅用于功能兼容验证，不代表真实教学结论。</div>` : (q.insufficient_real_data ? `<div class="empty">真实多课堂数据不足，趋势洞察已从前端移除。<div class="action-row"><a class="button secondary" href="/teacher/reports">打开报告中心</a></div></div>` : ""));
         const labels=[["lesson_count","课堂数"],["avg_score","平均反馈"],["avg_attention_score","平均专注"],["avg_activity_score","平均活跃"],["risk_lesson_count","风险课堂"],["high_risk_count","高风险"]];
-        document.getElementById("overview").innerHTML=labels.map(([k,l])=>`<div class="metric"><span>${l}</span><strong>${text(o[k],0)}</strong></div>`).join("");
+        document.getElementById("overview").innerHTML=labels.filter(([k])=>o[k]!==null&&o[k]!==undefined).map(([k,l])=>`<div class="metric"><span>${l}</span><strong>${text(o[k],0)}</strong></div>`).join("");
         const x=s.labels||[];
         chart("score-chart",{color:["#2563eb"],animationDuration:700,animationEasing:"cubicOut",tooltip:{trigger:"axis",formatter:(ps)=>ps.map(p=>`${p.axisValue}<br/>${p.marker}${p.seriesName}：${p.value}`).join("")},grid:{left:48,right:26,top:52,bottom:42},xAxis:{type:"category",data:x,axisLabel:{hideOverlap:true}},yAxis:{type:"value",min:0,max:100},series:[{type:"line",smooth:true,symbolSize:7,areaStyle:{opacity:.18},data:s.score||[],name:"教学反馈",markLine:{symbol:"none",lineStyle:{color:"#ea580c",type:"dashed"},data:[{yAxis:70,name:"重点复盘阈值"}]},markPoint:{symbolSize:46,data:[{type:"min",name:"低谷"}]}}]});
         chart("attention-chart",{color:["#2563eb","#0fba8c"],animationDuration:650,tooltip:{trigger:"axis"},legend:{data:["专注度","活跃度"]},grid:{left:42,right:20,top:48,bottom:42},xAxis:{type:"category",data:x,axisLabel:{hideOverlap:true}},yAxis:{type:"value",min:0,max:100},series:[{type:"line",smooth:true,areaStyle:{opacity:.1},data:s.attention_score||[],name:"专注度"},{type:"line",smooth:true,areaStyle:{opacity:.08},data:s.activity_score||[],name:"活跃度"}]});
@@ -312,8 +307,13 @@ def build_teacher_reports_html(current_user: Optional[dict] = None, result_id: O
     <script>
       const initialResultId = "__RESULT_ID__";
       const text=(v,f="暂无")=>v===null||v===undefined||v===""?f:v;
-      const riskLabel=(v)=>({low:"低风险",medium:"中风险",high:"高风险",unknown:"未知"}[v]||v||"未知");
+      const riskLabel=(v)=>({low:"低风险",medium:"中风险",high:"高风险",sample:"展示样本",unknown:"未知"}[v]||v||"未知");
       const sourceLabel=(v)=>({real:"真实数据",demo:"演示数据",all:"全部数据",unknown:"未知"}[v]||v||"未知");
+      const qualityParagraph=(v)=>v?'<p class="muted">'+text(v,'')+'</p>':'';
+      const sampleBadge=(item)=>item&&item.display_badge?`<span class="badge sample">${text(item.display_badge)}</span>`:"";
+      const metricText=(item)=>{const metrics=(item&&item.display_metrics)||[];return metrics.length?metrics.map((m)=>`${text(m.label)} ${text(m.value)}${m.suffix||""}`).join(" · "):text(item&&item.data_quality_note,"暂无可信指标");};
+      const metricGrid=(metrics)=>{metrics=metrics||[];return metrics.length?`<section class="grid">${metrics.map((m)=>`<div class="metric"><span>${text(m.label)}</span><strong>${text(m.value)}${m.suffix||""}</strong></div>`).join("")}</section>`:`<section class="card"><div class="empty">当前记录暂无可用于展示的可信指标。</div></section>`;};
+      const reportChartSection=(report,tl,st)=>{const profile=((report.presentation_scope||{}).metric_profile)||"standard";if(profile!=="standard")return `<section class="card"><h2>数据依据</h2><p class="muted">当前报告以视频证据、ASR 提问候选和视觉响应对齐为主，专注度与教学阶段分布不作为可信展示指标。</p></section>`;return `<section class="grid"><div class="chart-panel"><h2>数据依据：专注 / 活跃曲线</h2><div id="curve" class="chart"></div></div><div class="chart-panel"><h2>教学阶段结构</h2><div id="stage" class="chart"></div></div></section>`;};
       const params=()=>new URLSearchParams(window.location.search);
       function chart(id,opt){ if(window.echarts) echarts.init(document.getElementById(id)).setOption(opt); }
       function issueTitle(issue){ return issue.label || issue.tag || issue.issue_label || issue.type || issue.category || "增强问题"; }
@@ -332,7 +332,7 @@ def build_teacher_reports_html(current_user: Optional[dict] = None, result_id: O
         const isDemo = [summary.source, summary.status, report.dataset_source].some(v=>v==="demo"||v==="demo_seed");
         const distHtml = Object.entries(dist).map(([k,v])=>`<span class="badge">${questionKindLabel(k)} ${text(v)}</span>`).join(" ") || `<span class="muted">暂无提问类型分布。</span>`;
         const coverageHtml = Object.entries(coverage).map(([k,v])=>`<span class="badge">${({early:"前段",middle:"中段",late:"后段"}[k]||k)} ${text(v)}</span>`).join(" ") || `<span class="muted">暂无课堂阶段覆盖。</span>`;
-        const exampleHtml = examples.length ? examples.map((event)=>`<div class="record"><strong>${text(event.text||event.question_text||event.prompt||event.label,"未标注提问")}</strong><p class="muted">${questionKindLabel(event.question_type||event.type||event.category)} · ${text(event.start_sec||event.time_sec||event.timestamp_sec,"未知")}s</p><p><strong>响应：</strong>${text(event.response_signal||event.response||event.student_response)}</p><p><strong>建议：</strong>${text(event.guidance||event.suggestion)}</p></div>`).join("") : `<div class="empty">教师提问转写暂不可用，当前展示已有课堂行为报告。</div>`;
+        const exampleHtml = examples.length ? examples.map((event)=>`<div class="record"><strong>${text(event.text||event.question_text||event.prompt||event.label,"未标注提问")}</strong><p class="muted">${questionKindLabel(event.question_type||event.type||event.category)} · ${text(event.start_sec||event.time_sec||event.timestamp_sec,"未知")}s</p><p><strong>响应：</strong>${text(event.response_signal||event.response||event.student_response)}</p><p><strong>建议：</strong>${text(event.guidance||event.suggestion)}</p></div>`).join("") : `<div class="empty">未提供独立提问引导示例；如样本包含 ASR 提问候选，请以课堂分析详情页为准。</div>`;
         return `<section class="card" data-marker="phase33-report-question-guidance"><div class="record-head"><h2>教学提问引导分析</h2>${isDemo?`<span class="badge sample">演示数据</span>`:""}</div><section class="grid"><div class="metric"><span>提问数量</span><strong>${text(summary.question_count||summary.teacher_question_count||events.length,0)}</strong></div><div class="metric"><span>引导评分</span><strong>${text(summary.guidance_score||summary.score)}</strong></div><div class="metric"><span>响应信号</span><strong>${text(summary.response_signal_summary||summary.response_signal)}</strong></div></section><div class="record"><strong>提问分布</strong><p>${distHtml}</p><strong>阶段覆盖</strong><p>${coverageHtml}</p></div><div class="grid"><div class="record"><h3>主要问题</h3><p>${text(summary.main_issue||summary.issue)}</p><p><strong>证据：</strong>${text(summary.evidence)}</p></div><div class="record"><h3>改进建议</h3><p>${text(summary.suggestion)}</p></div></div><h3>提问时间线与示例</h3><div class="list">${exampleHtml}</div></section>`;
       }
       async function loadList(){
@@ -344,7 +344,7 @@ def build_teacher_reports_html(current_user: Optional[dict] = None, result_id: O
         document.getElementById("app").innerHTML=`<section class="grid"><div class="metric"><span>报告数</span><strong>${items.length}</strong></div><div class="metric"><span>高风险</span><strong>${highRisk}</strong></div><div class="metric"><span>待复盘</span><strong>${pending}</strong></div><div class="metric"><span>AI 状态</span><strong>可选</strong></div></section><section class="card"><form id="filters" class="filters"><div><label>班级</label><input name="classroom_id" value="${text(p.get("classroom_id"),"")}"></div><div><label>开始日期</label><input type="date" name="date_from" value="${text(p.get("date_from"),"")}"></div><div><label>结束日期</label><input type="date" name="date_to" value="${text(p.get("date_to"),"")}"></div><div><label>数据来源</label><select name="data_source"><option value="real">真实数据</option><option value="demo">演示数据</option><option value="all">全部数据</option></select></div><div><label>数量</label><input name="limit" type="number" min="1" max="100" value="${text(p.get("limit"),"20")}"></div><button class="button">筛选</button></form>${(payload.filters||{}).data_source!=="real"?`<div class="warning">当前包含演示数据，请勿与真实教学趋势混淆。</div>`:""}</section><section class="grid" id="reports"></section>`;
         document.querySelector("[name=data_source]").value=(payload.filters||{}).data_source||"real";
         document.getElementById("filters").addEventListener("submit",e=>{e.preventDefault();const q=new URLSearchParams(new FormData(e.target));[...q.keys()].forEach(k=>{if(!q.get(k))q.delete(k)});window.location.search=q.toString();});
-        document.getElementById("reports").innerHTML=items.length?items.map(i=>`<article class="report-card"><div class="record-head"><h2>${text(i.lesson_title,"未命名课堂")}</h2><span class="badge ${text(i.risk_level,"unknown")}">${riskLabel(i.risk_level)}</span></div><p class="muted">${text(i.classroom_name)} · ${text(i.created_at)} · ${sourceLabel(i.dataset_source)}</p><p>反馈 ${text(i.score,0)} · 专注 ${text(i.attention_score,0)} · 活跃 ${text(i.activity_score,0)} · 提问 ${text(i.question_count,0)}</p><p class="muted">核心结论：建议结合风险等级查看课堂证据和规则建议。</p><p class="muted">建议摘要：优先复盘参与低谷、提问等待和学生响应质量。</p><div class="action-row"><a class="button" href="${i.report_url}">查看报告</a> <a class="button secondary" href="${i.dashboard_url}">打开课堂分析</a></div></article>`).join(""):`<div class="empty">当前没有可展示的课堂报告。</div>`;
+        document.getElementById("reports").innerHTML=items.length?items.map(i=>`<article class="report-card"><div class="record-head"><h2>${text(i.lesson_title,"未命名课堂")}</h2>${sampleBadge(i)}<span class="badge ${text(i.risk_level,"unknown")}">${riskLabel(i.risk_level)}</span></div><p class="muted">${text(i.classroom_name)} · ${text(i.created_at)} · ${sourceLabel(i.dataset_source)}</p>${qualityParagraph(i.data_quality_note)}<p>${metricText(i)}</p><p class="muted">核心结论：按当前样本口径展示可信数据，历史阶段和旧测试记录已从默认列表隔离。</p><p class="muted">建议摘要：优先结合课堂分析页查看视频证据、ASR 提问候选和响应对齐。</p><div class="action-row"><a class="button" href="${i.report_url}">查看报告</a> <a class="button secondary" href="${i.dashboard_url}">打开课堂分析</a></div></article>`).join(""):`<div class="empty">当前没有可展示的课堂报告。</div>`;
       }
       async function loadDetail(id){
         const r=await fetch(`/api/teacher/reports/detail?result_id=${encodeURIComponent(id)}`); if(!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -353,9 +353,11 @@ def build_teacher_reports_html(current_user: Optional[dict] = None, result_id: O
         const questionGuidanceSummary = report.question_guidance_summary || ((report.phase33||{}).question_guidance_summary) || {};
         const teacherQuestionEvents = report.teacher_question_events || ((report.phase33||{}).teacher_question_events) || [];
         document.getElementById("title").textContent=`课堂报告：${text(b.lesson_title)}`;
-        document.getElementById("app").innerHTML=`<section class="grid"><div class="metric"><span>综合评分</span><strong>${text(sc.overall_score,0)}</strong></div><div class="metric"><span>专注度</span><strong>${text(sc.attention_score,0)}</strong></div><div class="metric"><span>活跃度</span><strong>${text(sc.activity_score,0)}</strong></div><div class="metric"><span>风险等级</span><strong>${riskLabel(report.risk_level)}</strong></div></section><section class="card"><h2>课堂基本信息</h2><p>${text(b.classroom_name)} · ${text(b.teacher_name)} · ${text(b.created_at)} · ${sourceLabel(report.dataset_source)}</p><a class="button secondary" href="${report.dashboard_url}">打开原始课堂分析</a></section><section class="grid"><div class="chart-panel"><h2>数据依据：专注 / 活跃曲线</h2><div id="curve" class="chart"></div></div><div class="chart-panel"><h2>教学阶段结构</h2><div id="stage" class="chart"></div></div></section><section class="grid"><div class="card"><h2>课堂结论</h2>${(report.highlights||[]).map(x=>`<div class="record">${x}</div>`).join("")}<h2>主要风险</h2>${(report.risks||[]).map(x=>`<div class="record">${x}</div>`).join("")||"<div class='empty'>暂无明显风险。</div>"}</div><div class="insight-panel"><h2>改进建议</h2>${(report.recommendations||[]).map(x=>`<div class="record">${x}</div>`).join("")}</div></section>${enhancedIssuesSection(enhancedIssues)}${questionGuidanceSection(questionGuidanceSummary, teacherQuestionEvents, report)}<section class="card"><h2>提问与响应分析</h2><p>提问数：${text(qa.question_count,0)} · 响应率：${text(qa.response_rate,0)}</p><div class="list">${(qa.events||[]).map(e=>`<div class="record">${text(e.text)}<br><span class="muted">${text(e.start_sec)}s</span></div>`).join("")||"<div class='empty'>暂无提问事件。</div>"}</div></section><section class="card"><h2>AI 综合评语</h2><p id="ai-status" class="muted">AI 综合评语未启用时，当前展示规则报告。</p><div id="ai-content" class="record">${text((report.ai_summary||{}).content,"未配置或尚未生成。")}</div><button class="button" id="ai-button">生成 AI 综合评语</button></section>`;
-        chart("curve",{color:["#2563eb","#10b981"],tooltip:{trigger:"axis"},legend:{data:["专注度","活跃度"]},xAxis:{type:"category",data:(tl.attention_curve||[]).map((_,i)=>i+1)},yAxis:{type:"value"},series:[{type:"line",smooth:true,data:tl.attention_curve||[],name:"专注度"},{type:"line",smooth:true,data:tl.activity_curve||[],name:"活跃度"}]});
-        chart("stage",{color:["#2563eb"],tooltip:{},xAxis:{type:"category",data:Object.keys(st)},yAxis:{type:"value"},series:[{type:"bar",data:Object.values(st)}]});
+        document.getElementById("app").innerHTML=`${metricGrid(report.display_metrics || [])}<section class="card"><h2>课堂基本信息 ${sampleBadge(report)}</h2><p>${text(b.classroom_name)} · ${text(b.teacher_name)} · ${text(b.created_at)} · ${sourceLabel(report.dataset_source)}</p>${qualityParagraph(report.data_quality_note)}<a class="button secondary" href="${report.dashboard_url}">打开原始课堂分析</a></section>${reportChartSection(report,tl,st)}<section class="grid"><div class="card"><h2>课堂结论</h2>${(report.highlights||[]).map(x=>`<div class="record">${x}</div>`).join("")}<h2>主要风险</h2>${(report.risks||[]).map(x=>`<div class="record">${x}</div>`).join("")||"<div class='empty'>暂无明显风险。</div>"}</div><div class="insight-panel"><h2>改进建议</h2>${(report.recommendations||[]).map(x=>`<div class="record">${x}</div>`).join("")}</div></section>${(((report.presentation_scope||{}).metric_profile)||"standard")==="standard"?enhancedIssuesSection(enhancedIssues):""}${questionGuidanceSection(questionGuidanceSummary, teacherQuestionEvents, report)}<section class="card"><h2>提问与响应分析</h2><p>提问数：${text(qa.question_count,0)} · 响应率：${text(qa.response_rate,0)}</p><div class="list">${(qa.events||[]).map(e=>`<div class="record">${text(e.text)}<br><span class="muted">${text(e.start_sec)}s</span></div>`).join("")||"<div class='empty'>暂无提问事件。</div>"}</div></section><section class="card"><h2>AI 综合评语</h2><p id="ai-status" class="muted">AI 综合评语未启用时，当前展示规则报告。</p><div id="ai-content" class="record">${text((report.ai_summary||{}).content,"未配置或尚未生成。")}</div><button class="button" id="ai-button">生成 AI 综合评语</button></section>`;
+        if(((report.presentation_scope||{}).metric_profile||"standard")==="standard"){
+          chart("curve",{color:["#2563eb","#10b981"],tooltip:{trigger:"axis"},legend:{data:["专注度","活跃度"]},xAxis:{type:"category",data:(tl.attention_curve||[]).map((_,i)=>i+1)},yAxis:{type:"value"},series:[{type:"line",smooth:true,data:tl.attention_curve||[],name:"专注度"},{type:"line",smooth:true,data:tl.activity_curve||[],name:"活跃度"}]});
+          chart("stage",{color:["#2563eb"],tooltip:{},xAxis:{type:"category",data:Object.keys(st)},yAxis:{type:"value"},series:[{type:"bar",data:Object.values(st)}]});
+        }
         document.getElementById("ai-button").onclick=async()=>{const rr=await fetch("/api/teacher/reports/ai-summary",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({result_id:id})}); const p=await rr.json(); const ai=p.ai_summary||{}; document.getElementById("ai-status").textContent=ai.status||"未知"; document.getElementById("ai-content").textContent=ai.content||ai.error||"AI 综合评语暂不可用，规则报告不受影响。";};
       }
       (initialResultId ? loadDetail(initialResultId) : loadList()).catch(e=>document.getElementById("page-error").textContent=`报告中心加载失败：${e}`);

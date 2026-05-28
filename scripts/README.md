@@ -21,8 +21,13 @@ Future sync expectations:
 - Sync scripts should print the planned file set before any copy/update step.
 
 Cloud backend operations:
-- Use `test_cloud_backend.sh` only for smoke verification of the ingestion endpoint.
-- Keep service-install or service-enable actions separate from test scripts.
+- `deploy_cloud_backend.sh` is the current source-side manual startup helper for `/root/video_project_src`.
+- It expects the server-side runtime env file at `cloud_backend/.env.runtime` and the formal source-side port `8011`.
+- `check_cloud_runtime_observability.sh` is the minimal operator observability script for continuous-upload monitoring.
+- It checks the SQLite file, recent raw files, recent API output, and dashboard HTML markers without changing service state.
+- `upload_real_result.sh` is the current V1.1 upload validation helper against `POST /api/interaction-results`.
+- `test_cloud_backend.sh` is a historical smoke script and should not be treated as the formal V1.1 validation path.
+- Keep service-install or service-enable actions separate from validation scripts.
 - Prefer `.service.example` or documentation updates before any real process-manager change.
 
 Naming suggestions:

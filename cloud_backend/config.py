@@ -45,6 +45,17 @@ class Settings:
     jwt_algorithm: str = os.getenv("CLOUD_JWT_ALGORITHM", "HS256")
     jwt_expire_minutes: int = int(os.getenv("CLOUD_JWT_EXPIRE_MINUTES", "120"))
 
+    register_email_required: bool = _to_bool(os.getenv("CLOUD_REGISTER_EMAIL_REQUIRED"), True)
+    smtp_host: str = os.getenv("CLOUD_SMTP_HOST", os.getenv("SMTP_HOST", "smtp.qq.com"))
+    smtp_port: int = int(os.getenv("CLOUD_SMTP_PORT", os.getenv("SMTP_PORT", "465")))
+    smtp_username: str = os.getenv("CLOUD_SMTP_USERNAME", os.getenv("SMTP_USERNAME", ""))
+    smtp_password: str = os.getenv("CLOUD_SMTP_PASSWORD", os.getenv("SMTP_PASSWORD", ""))
+    smtp_from: str = os.getenv("CLOUD_SMTP_FROM", os.getenv("SMTP_FROM", os.getenv("CLOUD_SMTP_USERNAME", os.getenv("SMTP_USERNAME", ""))))
+    smtp_use_ssl: bool = _to_bool(os.getenv("CLOUD_SMTP_USE_SSL", os.getenv("SMTP_USE_SSL")), True)
+    smtp_timeout_seconds: int = int(os.getenv("CLOUD_SMTP_TIMEOUT_SECONDS", "15"))
+    email_code_expire_minutes: int = int(os.getenv("CLOUD_EMAIL_CODE_EXPIRE_MINUTES", "10"))
+    email_code_cooldown_seconds: int = int(os.getenv("CLOUD_EMAIL_CODE_COOLDOWN_SECONDS", "60"))
+
     def ensure_directories(self) -> None:
         """Create the runtime directories required by the service."""
         self.data_dir.mkdir(parents=True, exist_ok=True)

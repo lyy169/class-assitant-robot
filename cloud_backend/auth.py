@@ -1,7 +1,14 @@
 """V2 auth, role, admin, and teacher API routes."""
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
+import smtplib
+import ssl
 import uuid
+from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from typing import Any, Dict, Optional
 
 import psycopg2
@@ -21,6 +28,21 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=64)
+    email: str = Field(..., min_length=6, max_length=120)
+    password: str = Field(..., min_length=6, max_length=128)
+    confirm_password: str = Field(..., min_length=6, max_length=128)
+    verification_code: str = Field(..., min_length=4, max_length=12)
+    display_name: Optional[str] = Field(default=None, max_length=80)
+    classroom_id: Optional[str] = Field(default=None, max_length=80)
+    classroom_name: Optional[str] = Field(default=None, max_length=120)
+
+
+class EmailCodeRequest(BaseModel):
+    email: str = Field(..., min_length=6, max_length=120)
+
+
 class UserCreateRequest(BaseModel):
     username: str
     password: str = Field(..., min_length=6)
@@ -33,7 +55,111 @@ class StatusUpdateRequest(BaseModel):
     status: str
 
 
+class AISummaryRequest(BaseModel):
+    result_id: str
+
+
 AUTH_COOKIE_NAME = "auth_token"
+
+
+def _normalize_username(username: str) -> str:
+    normalized = (username or "").strip()
+    if len(normalized) < 3:
+        raise HTTPException(status_code=422, detail="username must be at least 3 characters")
+    if len(normalized) > 64:
+        raise HTTPException(status_code=422, detail="username must be at most 64 characters")
+    if not all(ch.isalnum() or ch in {"_", "-", ".", "@"} for ch in normalized):
+        raise HTTPException(status_code=422, detail="username can only contain letters, numbers, _, -, ., @")
+    return normalized
+
+
+def _normalize_email(email: str) -> str:
+    normalized = (email or "").strip().lower()
+    if len(normalized) > 120 or "@" not in normalized:
+        raise HTTPException(status_code=422, detail="valid QQ email is required")
+    local, _, domain = normalized.partition("@")
+    if not local or domain != "qq.com":
+        raise HTTPException(status_code=422, detail="only QQ email registration is supported")
+    if not local.replace(".", "").replace("_", "").replace("-", "").isalnum():
+        raise HTTPException(status_code=422, detail="invalid QQ email format")
+    return normalized
+
+
+def _validate_register_password(password: str, confirm_password: str) -> None:
+    if password != confirm_password:
+        raise HTTPException(status_code=422, detail="password confirmation does not match")
+    if len(password) < 8:
+        raise HTTPException(status_code=422, detail="password must be at least 8 characters")
+    if not any(ch.isalpha() for ch in password) or not any(ch.isdigit() for ch in password):
+        raise HTTPException(status_code=422, detail="password must contain letters and numbers")
+
+
+def _normalize_optional_text(value: Optional[str], fallback: Optional[str] = None) -> Optional[str]:
+    normalized = (value or "").strip()
+    return normalized or fallback
+
+
+def _verification_code_hash(email: str, code: str) -> str:
+    message = f"{email}:{code.strip()}".encode("utf-8")
+    secret = settings.jwt_secret.encode("utf-8")
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+def _smtp_configured() -> bool:
+    return bool(settings.smtp_host and settings.smtp_port and settings.smtp_username and settings.smtp_password and settings.smtp_from)
+
+
+def _send_email_verification_code(email: str, code: str) -> None:
+    if not _smtp_configured():
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="SMTP is not configured")
+
+    message = EmailMessage()
+    message["Subject"] = "智能课堂平台注册验证码"
+    message["From"] = settings.smtp_from
+    message["To"] = email
+    message.set_content(
+        "\n".join(
+            [
+                "你正在注册智能课堂行为分析与教学反馈平台教师账号。",
+                f"验证码：{code}",
+                f"有效期：{settings.email_code_expire_minutes} 分钟。",
+                "如果不是你本人操作，请忽略本邮件。",
+            ]
+        )
+    )
+
+    if settings.smtp_use_ssl:
+        context = ssl.create_default_context()
+        with smtplib.SMTP_SSL(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds, context=context) as server:
+            server.login(settings.smtp_username, settings.smtp_password)
+            server.send_message(message)
+    else:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port, timeout=settings.smtp_timeout_seconds) as server:
+            server.starttls(context=ssl.create_default_context())
+            server.login(settings.smtp_username, settings.smtp_password)
+            server.send_message(message)
+
+
+def _issue_login_token(user: Dict[str, Any], response: Response) -> Dict[str, Any]:
+    token = create_access_token(
+        subject=str(user["user_id"]),
+        claims={"username": user["username"], "role": user["role"]},
+    )
+    response.set_cookie(
+        key=AUTH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    public_user = _user_public(user)
+    return {
+        "success": True,
+        "access_token": token,
+        "token_type": "bearer",
+        "user": public_user,
+        "redirect_to": "/admin" if public_user["role"] == "admin" else "/teacher",
+    }
 
 
 def _database_url() -> str:
@@ -180,28 +306,137 @@ def optional_page_user(auth_token: Optional[str]) -> Optional[Dict[str, Any]]:
 
 @router.post("/auth/login")
 def login(request: LoginRequest, response: Response) -> Dict[str, Any]:
-    user = _get_user_by_username(request.username)
+    user = _get_user_by_username(_normalize_username(request.username))
     if not user or not user.get("is_active"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
     if not verify_password(request.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="invalid credentials")
 
-    token = create_access_token(
-        subject=str(user["user_id"]),
-        claims={"username": user["username"], "role": user["role"]},
-    )
-    response.set_cookie(
-        key=AUTH_COOKIE_NAME,
-        value=token,
-        httponly=True,
-        samesite="lax",
-        path="/",
-    )
-    public_user = _user_public(user)
+    return _issue_login_token(user, response)
+
+
+@router.post("/auth/send-register-code")
+def send_register_code(request: EmailCodeRequest) -> Dict[str, Any]:
+    email = _normalize_email(request.email)
+    now = datetime.now(timezone.utc)
+    cooldown_after = now - timedelta(seconds=settings.email_code_cooldown_seconds)
+
+    with _connect() as connection:
+        with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+            cursor.execute("SELECT 1 FROM users WHERE lower(email) = lower(%s) LIMIT 1", (email,))
+            if cursor.fetchone():
+                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already registered")
+            cursor.execute(
+                """
+                SELECT created_at
+                FROM auth_email_verification_codes
+                WHERE email = %s AND purpose = 'register'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (email,),
+            )
+            latest = cursor.fetchone()
+            if latest and latest.get("created_at") and latest["created_at"] > cooldown_after:
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="please wait before requesting another code")
+
+            code = f"{secrets.randbelow(1000000):06d}"
+            expires_at = now + timedelta(minutes=settings.email_code_expire_minutes)
+            cursor.execute(
+                """
+                INSERT INTO auth_email_verification_codes (email, code_hash, purpose, expires_at)
+                VALUES (%s, %s, 'register', %s)
+                """,
+                (email, _verification_code_hash(email, code), expires_at),
+            )
+
+    _send_email_verification_code(email, code)
+    return {"success": True, "email": email, "expires_in_seconds": settings.email_code_expire_minutes * 60}
+
+
+@router.post("/auth/register")
+def register(request: RegisterRequest) -> Dict[str, Any]:
+    username = _normalize_username(request.username)
+    email = _normalize_email(request.email)
+    _validate_register_password(request.password, request.confirm_password)
+    display_name = _normalize_optional_text(request.display_name, fallback=username)
+    classroom_id = _normalize_optional_text(request.classroom_id)
+    classroom_name = _normalize_optional_text(request.classroom_name, fallback=classroom_id)
+    code_hash = _verification_code_hash(email, request.verification_code)
+
+    try:
+        with _connect() as connection:
+            with connection.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute("SELECT 1 FROM users WHERE username = %s LIMIT 1", (username,))
+                if cursor.fetchone():
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="username already exists")
+                cursor.execute("SELECT 1 FROM users WHERE lower(email) = lower(%s) LIMIT 1", (email,))
+                if cursor.fetchone():
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="email already registered")
+                cursor.execute(
+                    """
+                    SELECT id, attempts
+                    FROM auth_email_verification_codes
+                    WHERE email = %s
+                      AND purpose = 'register'
+                      AND used_at IS NULL
+                      AND expires_at > now()
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    (email,),
+                )
+                verification = cursor.fetchone()
+                if not verification:
+                    raise HTTPException(status_code=422, detail="verification code is missing or expired")
+                if verification.get("attempts", 0) >= 5:
+                    raise HTTPException(status_code=422, detail="verification code attempts exceeded")
+                cursor.execute(
+                    """
+                    SELECT id
+                    FROM auth_email_verification_codes
+                    WHERE id = %s AND code_hash = %s
+                    """,
+                    (verification["id"], code_hash),
+                )
+                if not cursor.fetchone():
+                    cursor.execute(
+                        "UPDATE auth_email_verification_codes SET attempts = attempts + 1 WHERE id = %s",
+                        (verification["id"],),
+                    )
+                    raise HTTPException(status_code=422, detail="verification code is invalid")
+
+                cursor.execute(
+                    """
+                    INSERT INTO users (user_id, username, email, email_verified, display_name, password_hash, role, is_active)
+                    VALUES (%s::uuid, %s, %s, TRUE, %s, %s, 'teacher', TRUE)
+                    RETURNING user_id::text AS user_id, username, email, display_name, role, is_active, created_at
+                    """,
+                    (str(uuid.uuid4()), username, email, display_name, hash_password(request.password)),
+                )
+                user = dict(cursor.fetchone())
+                cursor.execute(
+                    "UPDATE auth_email_verification_codes SET used_at = now() WHERE id = %s",
+                    (verification["id"],),
+                )
+                if classroom_id:
+                    cursor.execute(
+                        """
+                        INSERT INTO teacher_classrooms (user_id, classroom_id, classroom_name)
+                        VALUES (%s::uuid, %s, %s)
+                        ON CONFLICT (user_id, classroom_id) DO UPDATE SET
+                            classroom_name = EXCLUDED.classroom_name
+                        """,
+                        (user["user_id"], classroom_id, classroom_name or classroom_id),
+                    )
+    except psycopg2.errors.UniqueViolation as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="username already exists") from exc
+
     return {
         "success": True,
-        "user": public_user,
-        "redirect_to": "/admin" if public_user["role"] == "admin" else "/teacher",
+        "user": _user_public(user),
+        "redirect_to": "/login",
+        "message": "registration completed, please login",
     }
 
 
@@ -302,16 +537,84 @@ def teacher_session_detail(
 
 @router.get("/teacher/trends")
 def teacher_trends(
-    limit: int = Query(default=5, ge=1, le=50),
+    classroom_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    data_source: str = Query(default="real"),
+    limit: int = Query(default=20, ge=1, le=100),
     current_user: Dict[str, Any] = Depends(_require_teacher),
 ) -> Dict[str, Any]:
     from .main import repository
 
-    if hasattr(repository, "get_teacher_trends"):
-        trends = repository.get_teacher_trends(current_user["user_id"], limit=limit)
-    else:
-        trends = []
-    return {"success": True, "limit": limit, "trends": trends}
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
+    if not hasattr(repository, "get_phase3_teacher_trends"):
+        return {"success": True, "filters": {"data_source": data_source or "real"}, "overview": {}, "series": {}, "stage_distribution": {}, "risk_lessons": [], "recommendations": [], "data_quality": {}}
+    return repository.get_phase3_teacher_trends(
+        user_id=user_id,
+        classroom_id=classroom_id,
+        date_from=date_from,
+        date_to=date_to,
+        data_source=data_source,
+        limit=limit,
+    )
+
+
+@router.get("/teacher/reports")
+def teacher_reports(
+    classroom_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    data_source: str = Query(default="real"),
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: Dict[str, Any] = Depends(_require_teacher),
+) -> Dict[str, Any]:
+    from .main import repository
+
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
+    if not hasattr(repository, "get_phase3_teacher_reports"):
+        return {"success": True, "filters": {"data_source": data_source or "real"}, "items": [], "total": 0}
+    return repository.get_phase3_teacher_reports(
+        user_id=user_id,
+        classroom_id=classroom_id,
+        date_from=date_from,
+        date_to=date_to,
+        data_source=data_source,
+        limit=limit,
+    )
+
+
+@router.get("/teacher/reports/detail")
+def teacher_report_detail(
+    result_id: str,
+    current_user: Dict[str, Any] = Depends(_require_teacher),
+) -> Dict[str, Any]:
+    from .main import repository
+
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
+    if not hasattr(repository, "get_phase3_teacher_report_detail"):
+        raise HTTPException(status_code=404, detail="report not found")
+    report = repository.get_phase3_teacher_report_detail(result_id=result_id, user_id=user_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    return {"success": True, "report": report}
+
+
+@router.post("/teacher/reports/ai-summary")
+def teacher_report_ai_summary(
+    request: AISummaryRequest,
+    current_user: Dict[str, Any] = Depends(_require_teacher),
+) -> Dict[str, Any]:
+    from .ai_report import generate_ai_summary
+    from .main import repository
+
+    user_id = current_user["user_id"] if current_user.get("role") == "teacher" else None
+    if not hasattr(repository, "get_phase3_teacher_report_detail"):
+        raise HTTPException(status_code=404, detail="report not found")
+    report = repository.get_phase3_teacher_report_detail(result_id=request.result_id, user_id=user_id)
+    if report is None:
+        raise HTTPException(status_code=404, detail="report not found")
+    ai_summary = generate_ai_summary(report)
+    return {"success": ai_summary.get("status") != "failed", "ai_summary": ai_summary}
 
 
 @router.get("/teacher/results/recent")
@@ -573,6 +876,30 @@ def admin_ingestion(
         device_id=device_id,
         source_host=source_host,
         days=parsed_days,
+        limit=limit,
+    )
+
+
+@router.get("/admin/trends")
+def admin_trends(
+    classroom_id: Optional[str] = None,
+    teacher_id: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    data_source: str = Query(default="real"),
+    limit: int = Query(default=30, ge=1, le=100),
+    _: Dict[str, Any] = Depends(_require_admin),
+) -> Dict[str, Any]:
+    from .main import repository
+
+    if not hasattr(repository, "get_phase3_admin_trends"):
+        return {"success": True, "filters": {"data_source": data_source or "real"}, "overview": {}, "classroom_rankings": [], "teacher_activity": [], "risk_lessons": [], "recent_reports": [], "data_quality": {}}
+    return repository.get_phase3_admin_trends(
+        classroom_id=classroom_id,
+        teacher_id=teacher_id,
+        date_from=date_from,
+        date_to=date_to,
+        data_source=data_source,
         limit=limit,
     )
 

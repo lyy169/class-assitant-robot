@@ -2,88 +2,115 @@
 
 ## Position
 
-`cloud_backend/` is the current formal cloud mainline for classroom interaction result ingestion.
+`cloud_backend/` is the formal cloud mainline for classroom interaction result ingestion and teacher-facing result viewing.
 
 It is responsible for:
-- receiving JSON pushed from the local YOLO workstation
-- validating the request payload at a minimal business-safe level
-- recording structured logs
-- persisting raw result files
+
+- receiving JSON pushed from the local analysis workstation
+- validating request payloads against classroom feedback JSON schema `v1.1`
+- logging structured request activity
+- persisting raw classroom interaction JSON
+- exposing latest and recent read-back routes
+- rendering the minimal teacher-facing results center
 
 It is not responsible for:
+
 - old Flask login pages
-- old Flask history pages
 - old Flask video page flow
-- the MP4 upload main chain
+- old Flask history page flow
+- direct MP4 and video page integration in the current round
 
-## Interface Boundary
+## Current Endpoints
 
-Current endpoints:
 - `GET /health`
 - `POST /api/interaction-results`
+- `GET /api/latest-interaction-result`
+- `GET /api/recent-interaction-results`
+- `GET /dashboard`
 
-Operational meaning:
-- `/health` is the liveness check for process supervision and smoke verification
-- `/api/interaction-results` is the formal ingestion endpoint for classroom interaction result JSON
+## Operational Meaning
+
+- `/health`
+  - liveness check for smoke tests and supervision
+- `/api/interaction-results`
+  - formal ingestion endpoint for classroom interaction result JSON
+- `/api/latest-interaction-result`
+  - latest readable result, with optional `classroom_id`
+- `/api/recent-interaction-results`
+  - recent result list, with optional `classroom_id` and `limit`
+- `/dashboard`
+  - minimal teacher-facing results center
 
 ## Startup
 
-Typical manual startup from the deployment copy:
+The authoritative deployment instructions for the source-side `8011` service are maintained in:
 
-```bash
-cd /root/video_project
-source /root/venv/bin/activate
-pip install -r cloud_backend/requirements.txt
-uvicorn cloud_backend.main:app --host 0.0.0.0 --port 8010
-```
+- `docs/runbooks/cloud-runtime-and-sqlite-deploy-v1.md`
 
-Notes:
-- keep the current deployment directory unchanged
-- do not combine startup changes with Git bootstrap changes
-- use a dedicated `.env` when moving toward formal supervision
+Use that runbook for:
 
-## Health Check
+- `.env.runtime` preparation
+- `8011` startup
+- SQLite query backend configuration
+- raw fallback write-path verification
+- SSHFS-safe operator steps that must be run on the Linux server
 
-Recommended verification:
+## Result Read Order
 
-```bash
-curl http://127.0.0.1:8010/health
-```
+For latest and recent queries:
 
-Expected response:
+1. matching raw JSON under `cloud_backend/data/raw/`
+2. fallback sample JSON under `cloud_backend/sample_data/`
 
-```json
-{"status":"ok"}
-```
+This means the source-side results center can still be demonstrated safely when no raw classroom data has been pushed yet.
 
-## Ingestion Endpoint
+## Payload Contract
 
-Primary endpoint:
+The only accepted payload standard for this stage is classroom feedback JSON schema `v1.1`.
 
-```text
-POST /api/interaction-results
-```
+Key protocol groups:
 
-Current behavior:
-- accepts JSON object payloads
-- accepts direct payload or envelope-with-`payload`
-- optionally checks `X-API-Key`
-- validates business fields such as `classroom_id` and `source_host` when required by configuration
-- writes raw JSON to disk
+- `schema_version`
+- `analysis_id`, `classroom_id`, `video_id`
+- `source`
+- `time`
+- `summary`
+- `teacher`
+- `students`
+- `timeline`
 
-## Data Persistence Path
+## Dashboard Scope
 
-Current raw result path:
+The current `/dashboard` includes:
+
+- latest classroom overview card
+- recent result list
+- simple classroom filter input
+- latest region / heat summary
+- latest interaction breakdown
+- system note for future MP4 and video archive support
+
+This is a teacher-facing prototype, not yet the final production dashboard.
+
+## Data Persistence
+
+Current runtime persistence path:
 
 ```text
 cloud_backend/data/raw/YYYY-MM-DD/<window_id>.json
 ```
 
-This path is deployment runtime data and must not be included in the first source-managed Git bootstrap.
+Current source-side sample path:
+
+```text
+cloud_backend/sample_data/
+```
+
+The runtime data path must stay outside Git management.
 
 ## Environment Variable Categories
 
-Real `.env` values should be grouped by category:
+Recommended `.env` categories:
 
 - service base config
   - app name
@@ -94,13 +121,14 @@ Real `.env` values should be grouped by category:
 - storage config
   - data directory
   - raw JSON directory
+  - sample data directory
 - auth config
-  - whether API key is required
+  - API key required or not
   - API key value
-  - header name
+  - API key header name
 - business validation config
-  - whether `classroom_id` is required
-  - whether `source_host` is required
+  - `classroom_id` required or not
+  - `source_host` required or not
 - future data backend config
   - backend type
   - database URL
@@ -108,42 +136,32 @@ Real `.env` values should be grouped by category:
 ## Logging Guidance
 
 Recommended split:
-- process logs collected by `systemd` or `supervisor`
-- application logs containing request source, `request_id`, `window_id`, saved path, and exception details
 
-Suggested future log location if file logs are introduced:
+- process logs handled by `systemd` or `supervisor`
+- application logs containing `request_id`, client source, `classroom_id`, `window_id`, and save path
+
+Suggested future file-log location if needed:
 
 ```text
 /root/video_project/logs/cloud_backend/
 ```
 
-This is a future recommendation only. Do not change the active online logging path in the current round.
+Do not change active online logging paths in the current round.
 
-## Future Supervision
+## Validation
 
-Preferred future supervision order:
-1. `systemd`
-2. `supervisor` if the server remains standardized on it
+Use:
 
-Supervision requirements:
-- clear working directory
-- dedicated `EnvironmentFile`
-- explicit service name
-- automatic restart only for abnormal process exit
-- no hidden coupling with old Flask service names
+- `docs/runbooks/cloud-results-dashboard-runbook.md`
+- `docs/runbooks/cloud-results-center-validation-runbook.md`
+- `scripts/validate_cloud_results_center.sh`
 
-Recommended service name:
-- `classroom-cloud-backend.service`
+## Future Integration Boundary
 
-## Source Vs Deploy Boundary
+MP4 upload and video browsing remain preserved capabilities.
 
-Current deployment boundary:
-- deployment copy: `video_project/`
-- runtime data: `cloud_backend/data/`
-- runtime logs: `logs/`
+Planned role:
 
-Future source boundary:
-- separate source directory: `video_project_src/`
-- first managed assets: `cloud_backend/`, `docs/`, `scripts/`
-
-Do not treat the current deployment copy as the clean source repository before the separate source directory exists.
+- `dashboard` remains the top-level teacher results center
+- MP4 and video archive views later join as supporting teacher-facing modules
+- old Flask pages remain legacy references until a later integration round

@@ -1,15 +1,20 @@
 [Unit]
 Description=Classroom Cloud Backend Service
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/root/video_project
-EnvironmentFile=-/root/video_project/cloud_backend/.env
-ExecStart=/root/venv/bin/uvicorn cloud_backend.main:app --host 0.0.0.0 --port 8010
+Group=root
+WorkingDirectory=/root/video_project_src
+EnvironmentFile=/root/video_project_src/cloud_backend/.env.postgres.runtime
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/venv/bin/uvicorn cloud_backend.main:app --host 0.0.0.0 --port 8011
 Restart=always
 RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGINT
 
 [Install]
 WantedBy=multi-user.target

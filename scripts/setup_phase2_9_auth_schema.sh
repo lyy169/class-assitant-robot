@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS users (
     id BIGSERIAL,
     user_id UUID PRIMARY KEY,
     username TEXT UNIQUE NOT NULL,
+    email TEXT,
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
     display_name TEXT,
     password_hash TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('teacher', 'admin')),
@@ -43,6 +45,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 ALTER TABLE users ADD COLUMN IF NOT EXISTS id BIGSERIAL;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS user_id UUID;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'teacher';
@@ -68,6 +72,7 @@ ALTER TABLE users ALTER COLUMN password_hash SET NOT NULL;
 ALTER TABLE users ALTER COLUMN role SET NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_user_id ON users(user_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username ON users(username);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON users(lower(email)) WHERE email IS NOT NULL AND email <> '';
 
 CREATE TABLE IF NOT EXISTS teacher_classrooms (
     user_id UUID NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
@@ -76,6 +81,20 @@ CREATE TABLE IF NOT EXISTS teacher_classrooms (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, classroom_id)
 );
+
+CREATE TABLE IF NOT EXISTS auth_email_verification_codes (
+    id BIGSERIAL PRIMARY KEY,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    purpose TEXT NOT NULL DEFAULT 'register',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    expires_at TIMESTAMPTZ NOT NULL,
+    used_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_email_codes_email_created ON auth_email_verification_codes(email, purpose, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_email_codes_expires ON auth_email_verification_codes(expires_at);
 
 INSERT INTO users (user_id, username, display_name, password_hash, role, is_active)
 VALUES (:'admin_user_id', 'admin', 'Demo Admin', :'admin_hash', 'admin', TRUE)
